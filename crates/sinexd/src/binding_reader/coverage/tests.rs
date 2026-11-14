@@ -73,6 +73,7 @@ async fn round(
         rounds,
         stop,
         Access::default(),
+        crate::stage::ReadMode::ToEnd,
         &mut |_, _| {},
     )
     .await
