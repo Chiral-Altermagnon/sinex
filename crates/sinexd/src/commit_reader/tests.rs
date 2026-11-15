@@ -25,7 +25,7 @@ fn imported(command: &str, n: u64) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId(uuid::Uuid::from_u128(u128::from(n) + 1)),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -265,7 +265,7 @@ async fn search_failure_rolls_back_text_and_restart_covers_same_position(
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    // Exercise an empty rebuildable index, not admission's eager projection.
+    // Exercise an empty rebuildable index, not the rows admission writes as it commits.
     sqlx::query("DELETE FROM core.search_text")
         .execute(&mut conn)
         .await

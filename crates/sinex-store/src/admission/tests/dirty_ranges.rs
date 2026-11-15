@@ -39,7 +39,7 @@ fn event(kind: &str, payload: Value) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -172,7 +172,7 @@ async fn dirty_ranges_page_compressed_members_and_keep_distinct_keys(db: devkit:
         .unwrap();
     let mut competing = PgConnection::connect(&db.url(None)).await.unwrap();
     assert!(!crate::writer_lock::try_claim(&mut competing).await.unwrap());
-    sqlx::query("INSERT INTO core.events(id,event_type,source,run_id,material_id,anchor,ts_quality,commit_seq,payload,reading_order,record_hash,class)
+    sqlx::query("INSERT INTO core.events(id,event_type,source,run_id,material_id,record_offset,ts_quality,commit_seq,payload,reading_order,record_hash,class)
       SELECT ('01800000-0000-7000-8000-'||lpad(to_hex(n),12,'0'))::uuid,
         CASE WHEN n=8793 THEN 'synthetic.other_interval' ELSE $1 END,
         'synthetic-ranges',uuidv7(),uuidv7(),n,'unknown',1,
@@ -194,7 +194,7 @@ async fn dirty_ranges_page_compressed_members_and_keep_distinct_keys(db: devkit:
       ($1,'{"label":1.5}','01800000-0000-7000-8000-000000002002'),
       ($1,'{"wrong_kind":true}','01800000-0000-7000-8000-000000002259'),
       ($1,'{"missing":true}','01800000-0000-7000-8000-00000000dead'),
-      ('fixture.other_ranges','{"other_owner":true}','01800000-0000-7000-8000-00000000225a')"#,
+      ('fixture.other_ranges','{"other_key":true}','01800000-0000-7000-8000-00000000225a')"#,
     )
     .bind(NAME)
     .execute(&mut *conn)
@@ -281,9 +281,9 @@ async fn dirty_ranges_page_compressed_members_and_keep_distinct_keys(db: devkit:
                 .copied()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-        "duplicate event has distinct owners in one page"
+        "duplicate event has distinct derivations in one page"
     );
-    let owners: Vec<_> = first.iter().map(|row| row.derivation.clone()).collect();
+    let output_derivations: Vec<_> = first.iter().map(|row| row.derivation.clone()).collect();
     let page_keys: Vec<_> = first.iter().map(|row| row.key.clone()).collect();
     let output_types = vec![KIND.to_owned()];
     let names = vec![NAME.to_owned(); 2];
@@ -297,7 +297,7 @@ async fn dirty_ranges_page_compressed_members_and_keep_distinct_keys(db: devkit:
     let checked_keys = sqlx::query_file!(
         "src/admission/affected_outputs.sql",
         &ids,
-        &owners,
+        &output_derivations,
         &page_keys,
         &output_types,
         &names,

@@ -33,7 +33,7 @@ pub async fn resolve(conn: &mut PgConnection, reference: &Reference) -> Result<U
                 .map_err(|_| Error::Invalid("output index beyond i64".into()))?;
             let live = sqlx::query!(
                 r#"SELECT e.id AS "event_id!", e.event_type AS "event_type!" FROM core.visible_events e
-                   WHERE e.material_id = $1 AND e.anchor = $2
+                   WHERE e.material_id = $1 AND e.record_offset = $2
                    AND ($3::text IS NULL OR e.event_type = $3)
                    AND ($4::bigint IS NULL OR e.output_index = $4)
                    AND (EXISTS (SELECT 1 FROM core.live_locations c WHERE c.event_id = e.id)
@@ -50,7 +50,7 @@ pub async fn resolve(conn: &mut PgConnection, reference: &Reference) -> Result<U
                 [] => {
                     let archived = sqlx::query_scalar!(
                         r#"SELECT e.id AS "id!" FROM core.visible_events e JOIN audit.archived a ON a.event_id = e.id
-                           WHERE e.material_id = $1 AND e.anchor = $2
+                           WHERE e.material_id = $1 AND e.record_offset = $2
                            AND ($3::text IS NULL OR e.event_type = $3)
                            AND ($4::bigint IS NULL OR e.output_index = $4)
                            ORDER BY a.archived_seq DESC"#,
@@ -101,8 +101,7 @@ pub async fn resolve(conn: &mut PgConnection, reference: &Reference) -> Result<U
                     "no live {event_type} of {source} with key {key}"
                 ))),
                 _ => Err(Error::Invalid(
-                    "several live readings share the visible key; use an exact event citation"
-                        .into(),
+                    "several live readings share the visible key; cite the event by ID".into(),
                 )),
             }
         }
@@ -122,11 +121,11 @@ pub async fn show(conn: &mut PgConnection, reference: &Reference) -> Result<Json
              'archived', a.archived_at, 'archive_reason', a.reason,
              'record_state', e.record_state, 'class', e.class, 'key', e.equivalence_key,
              'reading_order',e.reading_order,'record_hash',encode(e.record_hash,'hex'),
-             'material', e.material_id, 'offset', e.anchor, 'output', e.output_index,
+             'material', e.material_id, 'offset', e.record_offset, 'output', e.output_index,
              'parents', to_jsonb(e.parents), 'run', e.run_id, 'producer', r.name, 'host', r.host,
              'parser', m.parser, 'parser_version', m.parser_version, 'blob', m.blob,
              'citation', CASE WHEN e.material_id IS NOT NULL
-               THEN 'sinex:record/' || e.material_id || '/' || e.anchor || '/' || e.event_type || '/' || e.output_index
+               THEN 'sinex:record/' || e.material_id || '/' || e.record_offset || '/' || e.event_type || '/' || e.output_index
                ELSE 'sinex:ev/' || e.id END,
              'payload', e.payload) AS "row!"
            FROM core.visible_events e
@@ -167,7 +166,7 @@ pub(crate) async fn walk(
         .map(|(id, depth)| json!({"id":id,"depth":depth}))
         .collect();
     // The visible view owns payload masking. Edges and tombstone skeletons
-    // retain identity after a tombstone, without reconstructing cleared content.
+    // keep identity after a tombstone, without reconstructing cleared content.
     // Compressed event estimates can otherwise turn a small selected set into
     // whole-history joins. Keep each event and its details keyed by that set.
     let rows = sqlx::query_scalar!(
@@ -186,7 +185,7 @@ pub(crate) async fn walk(
              'withheld', e.payload->'withheld', 'class', coalesce(e.class,t.class),
              'origin', CASE WHEN e.id IS NULL THEN NULL
                WHEN e.material_id IS NULL THEN 'derived' ELSE 'material' END,
-             'material', e.material_id, 'offset', e.anchor, 'output', e.output_index,
+             'material', e.material_id, 'offset', e.record_offset, 'output', e.output_index,
              'parents', coalesce(to_jsonb(e.parents),
                (SELECT jsonb_agg(c.parent ORDER BY c.parent) FROM core.event_parents_of(f.id) c)),
              'bytes', CASE WHEN e.material_id IS NULL THEN NULL
@@ -209,7 +208,7 @@ pub(crate) async fn walk(
     Ok(rows)
 }
 
-/// Breadth-first frontiers make the first visit the shortest distance. Keeping
+/// Breadth-first rounds make the first visit the shortest distance. Keeping
 /// only visited IDs avoids both cycles and an exponential list of branch paths.
 async fn lineage(
     conn: &mut PgConnection,
@@ -217,17 +216,17 @@ async fn lineage(
     direction: Walk,
 ) -> Result<BTreeMap<Uuid, u64>> {
     let mut visited = BTreeMap::from([(root, 0_u64)]);
-    let mut frontier = vec![root];
+    let mut next_nodes = vec![root];
     let mut depth = 0_u64;
-    while !frontier.is_empty() {
+    while !next_nodes.is_empty() {
         let adjacent = match direction {
             Walk::Descendants => sqlx::query_scalar!(
                 r#"SELECT DISTINCT c.child AS "child!" FROM unnest($1::uuid[]) f(id) CROSS JOIN LATERAL core.event_children_of(f.id) c ORDER BY 1"#,
-                &frontier,
+                &next_nodes,
             ).fetch_all(&mut *conn).await?,
             Walk::Trace | Walk::Parents => sqlx::query_scalar!(
                 r#"SELECT DISTINCT c.parent AS "parent!" FROM unnest($1::uuid[]) f(id) CROSS JOIN LATERAL core.event_parents_of(f.id) c ORDER BY 1"#,
-                &frontier,
+                &next_nodes,
             ).fetch_all(&mut *conn).await?,
         };
         depth = depth
@@ -236,11 +235,11 @@ async fn lineage(
         if matches!(direction, Walk::Parents) {
             return Ok(adjacent.into_iter().map(|id| (id, depth)).collect());
         }
-        frontier.clear();
+        next_nodes.clear();
         for id in adjacent {
             if let Entry::Vacant(entry) = visited.entry(id) {
                 entry.insert(depth);
-                frontier.push(id);
+                next_nodes.push(id);
             }
         }
     }

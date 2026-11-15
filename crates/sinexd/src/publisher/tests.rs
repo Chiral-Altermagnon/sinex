@@ -29,7 +29,7 @@ fn executed(native_id: &str, command: &str, order: i64, class: Class) -> Event {
             // Each record is alone in its material.
             location: RecordLocation {
                 material: MaterialId(uuid::Uuid::from_u128(order as u128)),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -185,8 +185,8 @@ async fn publishes_open_events_whole_and_others_by_id_in_commit_order(
     assert_eq!(open.payload["command"], "ls");
     assert_eq!(open.class, Class::Open);
     assert_eq!(
-        open.projection,
-        sinex_protocol::ProjectionIdentity::for_payload(&open.payload)
+        open.payload_identity,
+        sinex_protocol::PayloadIdentity::for_payload(&open.payload)
     );
     let Confirmed::Withheld(guarded) = &messages[1] else {
         panic!("a guarded event travels by ID")
@@ -427,13 +427,13 @@ async fn tombstoning_erases_the_published_message(db: devkit::pg::TestDatabase) 
         .await
         .unwrap();
     let rebuilt = read_wire_all(&js, &subjects).await;
-    let origin =
-        history_origin(&js.get_stream(subjects.confirmed_stream()).await.unwrap()).unwrap();
-    assert!(origin.requires_snapshot);
+    let stream_start =
+        read_stream_start(&js.get_stream(subjects.confirmed_stream()).await.unwrap()).unwrap();
+    assert!(stream_start.requires_snapshot);
     assert_eq!(
         rebuilt,
         vec![Confirmed::PositionComplete {
-            commit_seq: origin.position
+            commit_seq: stream_start.position
         }]
     );
     assert!(

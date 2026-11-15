@@ -24,17 +24,16 @@ impl DirState {
     pub(crate) fn restore_checkpoint(
         &mut self,
         memory: &[u8],
-        anchor: Option<&sinex_model::MaterialRef>,
+        memory_part: Option<&sinex_model::MaterialRef>,
         admitted: Option<u64>,
         removed_at_source: bool,
     ) -> Result<bool, DriverError> {
         let saved_through = crate::drivers::dir_snapshot::saved_through(memory)?;
-        let admitted = admitted.ok_or_else(|| {
-            DriverError::Cursor("directory memory has no admitted-prefix evidence".into())
-        })?;
-        if anchor.is_some_and(|anchor| admitted > anchor.length) {
+        let admitted = admitted
+            .ok_or_else(|| DriverError::Cursor("directory memory has no admitted prefix".into()))?;
+        if memory_part.is_some_and(|memory_part| admitted > memory_part.length) {
             return Err(DriverError::Cursor(
-                "directory memory has contradictory admitted-prefix evidence".into(),
+                "directory memory has a contradictory admitted prefix".into(),
             ));
         }
         if saved_through > admitted {
@@ -43,15 +42,15 @@ impl DirState {
             ));
         }
         if saved_through < admitted {
-            let anchor = anchor.ok_or_else(|| {
+            let memory_part = memory_part.ok_or_else(|| {
                 DriverError::Cursor("directory checkpoint suffix has no immutable material".into())
             })?;
-            self.remember_members_after(&anchor.manifest, admitted, Some(saved_through))?;
+            self.remember_members_after(&memory_part.manifest, admitted, Some(saved_through))?;
             if removed_at_source {
                 self.remember_locations_after(
-                    &anchor.manifest,
+                    &memory_part.manifest,
                     admitted,
-                    anchor.id,
+                    memory_part.id,
                     Some(saved_through),
                 )?;
             }
@@ -115,7 +114,7 @@ impl DirState {
             if member.details.contains_key("read_error") {
                 continue;
             }
-            let path = paths::native(member)?;
+            let path = paths::member_path(member)?;
             if self.remembered.contains(&path) {
                 continue;
             }
@@ -176,7 +175,7 @@ impl DirState {
             let path = read_path(&mut rest)?;
             let location = RecordLocation {
                 material: MaterialId(uuid::Uuid::from_bytes(take(&mut rest)?)),
-                anchor: u64::from_le_bytes(take(&mut rest)?),
+                record_offset: u64::from_le_bytes(take(&mut rest)?),
             };
             if locations.insert(path, location).is_some() {
                 return Err(damaged());
@@ -227,7 +226,7 @@ impl DirState {
             if member.details.contains_key("read_error") {
                 continue;
             }
-            let path = paths::native(member)?;
+            let path = paths::member_path(member)?;
             if self.saved_memory && !self.files.contains_key(&path) {
                 continue;
             }
@@ -241,7 +240,7 @@ impl DirState {
                     path,
                     RecordLocation {
                         material,
-                        anchor: start as u64,
+                        record_offset: start as u64,
                     },
                 );
             }
@@ -353,7 +352,7 @@ pub(super) fn memory_of(
     for (path, location) in locations {
         write_path(&mut bytes, path);
         bytes.extend_from_slice(location.material.0.as_bytes());
-        bytes.extend_from_slice(&location.anchor.to_le_bytes());
+        bytes.extend_from_slice(&location.record_offset.to_le_bytes());
     }
     bytes.into()
 }

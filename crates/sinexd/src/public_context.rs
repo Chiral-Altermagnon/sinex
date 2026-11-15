@@ -3,7 +3,7 @@ use crate::Result;
 use query_language::time::DaySettingWire;
 use sinex_model::Timestamp;
 use sinex_protocol::{PublicContext, PublicInterruptBudget};
-use sinex_store::signals::HostPolicyProjection;
+use sinex_store::signals::HostPolicyView;
 
 #[derive(Clone)]
 pub(crate) struct Provider {
@@ -48,7 +48,7 @@ impl Provider {
         conn: &mut sqlx::PgConnection,
         at: Timestamp,
     ) -> Result<PublicContext> {
-        let projection = sinex_store::signals::public_host_policy(
+        let policy = sinex_store::signals::public_host_policy(
             conn,
             &self.host,
             self.settings_identity.is_some(),
@@ -56,8 +56,8 @@ impl Provider {
             at,
         )
         .await?;
-        Ok(match projection {
-            HostPolicyProjection::Available {
+        Ok(match policy {
+            HostPolicyView::Available {
                 checkpoint_revision,
                 settings_identity,
                 quiet_hours,
@@ -65,7 +65,7 @@ impl Provider {
                 observed_at,
             } => PublicContext::Available {
                 settings_identity,
-                owner_revision: checkpoint_revision,
+                settings_revision: checkpoint_revision,
                 day: self.day.clone(),
                 quiet_hours,
                 interrupt_budget: PublicInterruptBudget {
@@ -76,8 +76,8 @@ impl Provider {
                 },
                 observed_at,
             },
-            HostPolicyProjection::Pending { reason } => PublicContext::Pending { reason },
-            HostPolicyProjection::Unavailable { reason } => PublicContext::Unavailable { reason },
+            HostPolicyView::Pending { reason } => PublicContext::Pending { reason },
+            HostPolicyView::Unavailable { reason } => PublicContext::Unavailable { reason },
         })
     }
 }

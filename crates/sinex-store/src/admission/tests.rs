@@ -35,7 +35,7 @@ fn keyed(source: &str, key: u8, content: u8, order: i64) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -260,7 +260,7 @@ fn watched(title: Option<&str>, order: i64) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -306,7 +306,7 @@ async fn location_keyed_records_are_one_live_reading_and_never_replaced(
         .await
         .unwrap();
     let material = MaterialId::new();
-    let at = |anchor: u64, change: &str, order: i64| {
+    let at = |record_offset: u64, change: &str, order: i64| {
         Event::build(
             &sinex_model::event_types::machine::FileChanged {
                 received_at: Timestamp::from_unix_secs(1).unwrap(),
@@ -319,7 +319,10 @@ async fn location_keyed_records_are_one_live_reading_and_never_replaced(
             },
             "file-watch",
             Origin::Record {
-                location: RecordLocation { material, anchor },
+                location: RecordLocation {
+                    material,
+                    record_offset,
+                },
                 output_index: 0,
             },
             ReadingOrder(order),
@@ -349,7 +352,7 @@ async fn a_dropped_record_gets_a_removed_reading_once(db: devkit::pg::TestDataba
         .unwrap();
     let location = RecordLocation {
         material: MaterialId::new(),
-        anchor: 2,
+        record_offset: 2,
     };
     let read = Event::build(
         &CommandImported {
@@ -380,7 +383,7 @@ async fn a_dropped_record_gets_a_removed_reading_once(db: devkit::pg::TestDataba
     assert_eq!(out.replaced, 1, "{out:?}");
     let state: (String, String) = sqlx::query_as(
         "SELECT e.record_state, e.payload->>'command' FROM core.live_equivalence q
-         JOIN core.events e ON e.id = q.event_id WHERE e.anchor = 2",
+         JOIN core.events e ON e.id = q.event_id WHERE e.record_offset = 2",
     )
     .fetch_one(&mut conn)
     .await
@@ -485,7 +488,7 @@ async fn admitted_and_archived_readings_mark_dirty_keys(db: devkit::pg::TestData
     let out = tx.admit(&batch(events), &ByDay).await.unwrap();
     tx.commit().await.unwrap();
     // One stored payload per event, so one key per event (docs/privacy.md:
-    // "Stored payloads stay raw"; there is no second, projected payload).
+    // "Stored payloads stay raw"; there is no second, transformed payload).
     assert_eq!(out.dirty_keys, 2, "each event marks its one input key");
     let n: i64 = sqlx::query_scalar!(
         r#"SELECT count(*) AS "n!" FROM derivation.dirty WHERE derivation = 'daily'"#
@@ -500,11 +503,11 @@ async fn admitted_and_archived_readings_mark_dirty_keys(db: devkit::pg::TestData
     .fetch_one(&mut conn)
     .await
     .unwrap();
-    let (_, frontier) = out.commit_seq.unwrap();
+    let (_, last_position) = out.commit_seq.unwrap();
     assert_eq!(
         (first, last),
-        (frontier, frontier),
-        "the atomic batch first marks its key at the completed frontier of every original and projected input"
+        (last_position, last_position),
+        "the atomic batch first marks its key at the last completed position of every original and derived input"
     );
     let op = crate::lifecycle::begin(
         &mut conn,
@@ -540,13 +543,13 @@ async fn admitted_and_archived_readings_mark_dirty_keys(db: devkit::pg::TestData
     .unwrap();
     assert_eq!(
         (archived_at, end_seq),
-        (frontier + 1, Some(frontier + 1)),
+        (last_position + 1, Some(last_position + 1)),
         "the one-batch archive takes the next position and ends there"
     );
     assert_eq!(changed.0, first, "archival preserves the first dirty mark");
     assert_eq!(
         changed.1, archived_at,
-        "and advances the last one to its actual lifecycle position"
+        "and advances the last one to its lifecycle position"
     );
 }
 #[devkit::test]
@@ -618,7 +621,7 @@ async fn untimed_zsh_occurrences_coexist_and_only_same_locations_repeat(
         .unwrap();
     let first = MaterialId::new();
     let second = MaterialId::new();
-    let make = |material, anchor, timed: bool| {
+    let make = |material, record_offset, timed: bool| {
         Event::build(
             &CommandImported {
                 command: "pwd".into(),
@@ -630,10 +633,13 @@ async fn untimed_zsh_occurrences_coexist_and_only_same_locations_repeat(
             },
             "zsh",
             Origin::Record {
-                location: RecordLocation { material, anchor },
+                location: RecordLocation {
+                    material,
+                    record_offset,
+                },
                 output_index: 0,
             },
-            ReadingOrder(anchor as i64),
+            ReadingOrder(record_offset as i64),
             [1; 32],
             Class::Open,
         )
@@ -805,8 +811,8 @@ async fn assigned_order_retry_and_rollback_share_the_admission_transaction(
         let mut batch = batch(vec![event.clone()]);
         batch.kind = BatchKind::Ingress(Box::new(sinex_model::IngressFrame {
             content_hash: None,
-            receipt_number: None,
-            native_source: None,
+            ack_number: None,
+            built_in_source: None,
             source_fingerprint: None,
             host: None,
             family: None,
@@ -852,7 +858,7 @@ async fn assigned_order_retry_and_rollback_share_the_admission_transaction(
 }
 
 /// Admitted and refused frames are recorded as typed outcomes that decode
-/// from their real rows, and an exact retry answers from the stored counts.
+/// from their real rows, and an identical retry answers from the stored counts.
 #[devkit::test]
 async fn stored_frame_outcome_decodes(db: devkit::pg::TestDatabase) {
     use crate::commit_log::{FrameOutcome, FrameResult};
@@ -868,8 +874,8 @@ async fn stored_frame_outcome_decodes(db: devkit::pg::TestDatabase) {
         });
         batch.kind = BatchKind::Ingress(Box::new(sinex_model::IngressFrame {
             content_hash: Some(format!("blake3:{name}")),
-            receipt_number: None,
-            native_source: None,
+            ack_number: None,
+            built_in_source: None,
             source_fingerprint: None,
             host: None,
             family: None,
@@ -952,7 +958,7 @@ mod output_ordinals;
 mod registration;
 
 #[devkit::test]
-async fn native_sources_keep_exact_labels_and_transport_provenance_on_initial_insert(
+async fn built_in_sources_keep_labels_and_transport_provenance_on_first_insert(
     db: devkit::pg::TestDatabase,
 ) {
     let mut catalog = PgConnection::connect(&db.url(None)).await.unwrap();
@@ -994,8 +1000,8 @@ async fn native_sources_keep_exact_labels_and_transport_provenance_on_initial_in
         };
         b.kind = BatchKind::Ingress(Box::new(sinex_model::IngressFrame {
             content_hash: None,
-            receipt_number: None,
-            native_source: Some(declaration.source.clone()),
+            ack_number: None,
+            built_in_source: Some(declaration.source.clone()),
             source_fingerprint: Some(declaration.fingerprint()),
             host: Some("attested-host".into()),
             family: Some("sinex".into()),
@@ -1062,7 +1068,7 @@ async fn native_sources_keep_exact_labels_and_transport_provenance_on_initial_in
         unreachable!()
     };
     frame.frame = "false-label".into();
-    frame.native_source = Some(declarations[1].source.clone());
+    frame.built_in_source = Some(declarations[1].source.clone());
     frame.source_fingerprint = Some(declarations[1].fingerprint());
     let mut tx = writer.begin().await.unwrap();
     assert!(tx.admit(&false_label, &NoDerivations).await.is_err());

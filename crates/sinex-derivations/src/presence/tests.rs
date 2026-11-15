@@ -5,14 +5,14 @@ use sinex_model::{Class, MaterialId, Origin, ReadingOrder, RecordLocation, Times
 fn at(seconds: i64) -> Timestamp {
     Timestamp::from_unix_secs(1_718_438_400 + seconds).unwrap()
 }
-fn record(kind: &str, payload: Value, anchor: u64) -> Event {
+fn record(kind: &str, payload: Value, record_offset: u64) -> Event {
     (sinex_model::event_types::find(kind).unwrap().build)(
         &payload,
         "synthetic.presence",
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor,
+                record_offset,
             },
             output_index: 0,
         },
@@ -47,13 +47,13 @@ fn intervals(inputs: &[Event]) -> Vec<PresenceInterval> {
 
 #[devkit::test]
 fn physical_bouts_override_afk_and_keep_the_contradiction() {
-    let mut claim = record(
+    let mut report = record(
         "presence.span",
         json!({"bucket":"test","row":1,"started_at":at(0),"ended_at":at(60),"status":"afk"}),
         100,
     );
-    claim.payload["scope"] = json!("seat");
-    let output = intervals(&[physical(0), physical(20), claim]);
+    report.payload["scope"] = json!("seat");
+    let output = intervals(&[physical(0), physical(20), report]);
     let present: Vec<_> = output
         .iter()
         .filter(|interval| interval.state == "present")
@@ -69,13 +69,13 @@ fn physical_bouts_override_afk_and_keep_the_contradiction() {
 }
 
 #[devkit::test]
-fn a_not_afk_claim_without_operator_input_is_unknown() {
-    let claim = record(
+fn not_afk_report_without_operator_input_is_unknown() {
+    let report = record(
         "presence.span",
         json!({"bucket":"test","row":1,"started_at":at(0),"ended_at":at(7200),"status":"not-afk"}),
         100,
     );
-    let output = intervals(&[claim]);
+    let output = intervals(&[report]);
     assert!(!output.is_empty());
     assert!(
         output

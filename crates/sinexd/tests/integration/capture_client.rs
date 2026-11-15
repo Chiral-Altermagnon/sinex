@@ -104,7 +104,7 @@ async fn path_events(conn: &mut PgConnection, path: &Path) -> Vec<(String, Strin
 
 #[devkit::test]
 async fn capture_only_binary_spools_before_daemon_and_resumes_over_nats_once() {
-    // Both packages must be selected so this is the exact candidate's daemon.
+    // Both packages must be selected so this is the candidate's daemon.
     let daemon_binary = Path::new(env!("CARGO_BIN_EXE_sinexd")).to_path_buf();
     let capture_binary = daemon_binary.with_file_name("sinex-capture");
     assert!(
@@ -150,7 +150,7 @@ async fn capture_only_binary_spools_before_daemon_and_resumes_over_nats_once() {
         .unwrap();
     let mut observer = PgConnection::connect(&database).await.unwrap();
     let store = root.join("daemon-store");
-    let mut server = native::server(
+    let mut server = built_in::server(
         &daemon_binary,
         &database,
         &store,
@@ -244,7 +244,7 @@ async fn capture_only_binary_spools_before_daemon_and_resumes_over_nats_once() {
         first_ids,
         "restart must reuse committed frame outcomes"
     );
-    let duplicates: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT material_id,anchor,output_index FROM core.events WHERE source='machine.file-watch' GROUP BY 1,2,3 HAVING count(*)<>1) duplicates").fetch_one(&mut conn).await.unwrap();
+    let duplicates: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT material_id,record_offset,output_index FROM core.events WHERE source='machine.file-watch' GROUP BY 1,2,3 HAVING count(*)<>1) duplicates").fetch_one(&mut conn).await.unwrap();
     assert_eq!(duplicates, 0);
     server.stop().await;
     let answer = query(
@@ -259,10 +259,7 @@ async fn capture_only_binary_spools_before_daemon_and_resumes_over_nats_once() {
             .fetch_one(&mut conn)
             .await
             .unwrap();
-    assert!(
-        acknowledged > 0,
-        "real ingress recorded durable producer frames"
-    );
+    assert!(acknowledged > 0, "real ingress recorded producer frames");
 }
 
-mod native;
+mod built_in;

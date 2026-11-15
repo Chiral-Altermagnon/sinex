@@ -70,14 +70,12 @@ async fn duplicate_kind_references_keep_exact_versions_missing_and_invalid_ident
 }
 
 #[devkit::test]
-async fn repeated_native_kinds_still_check_each_event_source_and_membership(
-    db: devkit::pg::TestDatabase,
-) {
+async fn repeated_kinds_still_check_each_event_source_and_membership(db: devkit::pg::TestDatabase) {
     let mut conn = crate::AdmissionContext::connect(&db.url(None))
         .await
         .unwrap();
     let source = sinex_model::SourceRef {
-        name: "synthetic.native".into(),
+        name: "synthetic.built-in".into(),
         version: 1,
     };
     let declaration = sinex_model::SourceDeclaration {
@@ -108,7 +106,7 @@ async fn repeated_native_kinds_still_check_each_event_source_and_membership(
     );
     let mut wrong_source = offered.clone();
     if let RecordOutcome::Events { events, .. } = &mut wrong_source.records[0] {
-        events[1].source = "synthetic.foreign".into();
+        events[1].source = "synthetic.other".into();
     }
     let error = register::provenance(&mut conn, &wrong_source, None)
         .await
@@ -117,7 +115,7 @@ async fn repeated_native_kinds_still_check_each_event_source_and_membership(
     assert!(
         error
             .to_string()
-            .contains("outside its exact native source declaration")
+            .contains("outside its built-in source declaration")
     );
     for version in [CommandImported::VERSION, 9_999] {
         let mut wrong_kind = offered.clone();
@@ -129,7 +127,7 @@ async fn repeated_native_kinds_still_check_each_event_source_and_membership(
             register::provenance(&mut conn, &wrong_kind, None)
                 .await
                 .is_err(),
-            "a registered foreign kind or unavailable exact version cannot join a permitted batch"
+            "a registered kind of another source or an unavailable version cannot join a permitted batch"
         );
     }
 }
@@ -230,7 +228,7 @@ async fn external_validation_and_rules_apply_on_every_writer_route(db: devkit::p
             Origin::Record {
                 location: RecordLocation {
                     material: MaterialId::new(),
-                    anchor: 0,
+                    record_offset: 0,
                 },
                 output_index: 0,
             },
@@ -256,7 +254,7 @@ async fn external_validation_and_rules_apply_on_every_writer_route(db: devkit::p
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -335,11 +333,11 @@ async fn current_apply_recreates_missing_views_and_preserves_outside_declaration
     let once = sinex_schema::catalog(&mut *conn).await.unwrap();
     sinex_schema::apply(&mut *conn).await.unwrap();
     assert_eq!(once, sinex_schema::catalog(&mut *conn).await.unwrap());
-    let owners = sinex_schema::kinds::Owners {
+    let kind_prefixes = sinex_schema::kinds::KindPrefixes {
         prefixes: BTreeMap::from([("polylogue".into(), "different".into())]),
     };
     assert!(
-        sinex_schema::apply_with_owners(&mut *conn, &owners)
+        sinex_schema::apply_with_kind_prefixes(&mut *conn, &kind_prefixes)
             .await
             .unwrap_err()
             .to_string()
@@ -377,7 +375,7 @@ async fn search_modes_apply_to_live_indexing_and_its_rebuild(db: devkit::pg::Tes
                 Origin::Record {
                     location: RecordLocation {
                         material: MaterialId::new(),
-                        anchor: 0,
+                        record_offset: 0,
                     },
                     output_index: 0,
                 },
@@ -491,7 +489,7 @@ async fn exact_versions_never_select_another_versions_schema(db: devkit::pg::Tes
                 Origin::Record {
                     location: RecordLocation {
                         material: MaterialId::new(),
-                        anchor: 0,
+                        record_offset: 0,
                     },
                     output_index: 0,
                 },
@@ -634,7 +632,7 @@ async fn field_hints_are_saved_without_setting_a_kind_wide_class(db: devkit::pg:
             Origin::Record {
                 location: RecordLocation {
                     material: MaterialId::new(),
-                    anchor: 0,
+                    record_offset: 0,
                 },
                 output_index: 0,
             },

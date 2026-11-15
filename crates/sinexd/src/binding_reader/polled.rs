@@ -17,7 +17,7 @@ impl PolledReader {
         priority: crate::writer::Priority,
     ) -> Result<drivers::Acquired> {
         let reader = self.0.clone();
-        crate::intake::blocking::run(priority, move || {
+        crate::submit::blocking::run(priority, move || {
             reader
                 .lock()
                 .map_err(|_| Error::internal("the reader stopped in a panic"))?
@@ -49,13 +49,13 @@ impl Reader for PolledReader {
     fn restore_memory(
         &mut self,
         memory: &[u8],
-        anchor: Option<&sinex_model::MaterialRef>,
+        memory_part: Option<&sinex_model::MaterialRef>,
         admitted: Option<u64>,
     ) -> Result<bool, drivers::DriverError> {
         self.0
             .lock()
             .expect("reader state")
-            .restore_memory(memory, anchor, admitted)
+            .restore_memory(memory, memory_part, admitted)
     }
     fn restored(&mut self) -> Result<(), drivers::DriverError> {
         self.0.lock().expect("reader state").restored()

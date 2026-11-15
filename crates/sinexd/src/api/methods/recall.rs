@@ -1,5 +1,5 @@
 //! Recall reads its answer at one commit position and presents it from the
-//! rows of that read. An ordinary interactive recall stores nothing; its pages
+//! rows of that read. An interactive recall stores nothing; its pages
 //! are the query cursor's pages at the same position.
 use super::*;
 use crate::Result;
@@ -44,7 +44,7 @@ impl Api {
         let read = if query::saved::reference_name(text).is_some() {
             sinex_store::query::run(&mut conn, text, None, &ctx, &page).await
         } else {
-            let operation = query::native::parse(text, &ctx)?;
+            let operation = query::template::parse(text, &ctx)?;
             sinex_store::query::run_operation(&mut conn, text, &operation, &ctx, &page).await
         }?;
         let mut answer = serde_json::to_value(&read)?;
@@ -136,7 +136,7 @@ async fn reads_history(conn: &mut sqlx::PgConnection, text: &str, ctx: &Context)
         let definitions = queries::definitions(conn, &name).await?;
         query::saved::bind_saved(text, ctx, &definitions)?
     } else {
-        query::native::parse(text, ctx).and_then(|operation| operation.bind(ctx))?
+        query::template::parse(text, ctx).and_then(|operation| operation.bind(ctx))?
     };
     Ok(bound
         .stages

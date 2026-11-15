@@ -15,10 +15,10 @@
 //!
 //! The key is the rule and the logical day. A key emits the intervals that
 //! start inside its day; it reads the earliest transitions after the day to end
-//! them. An interval still open at the end of the evidence has no end yet and
+//! them. An interval still open at the end of the inputs has no end yet and
 //! the key is recomputed whenever the derivation runs again. An interval is
-//! identified by its start evidence's record location: its end moves as later
-//! evidence arrives, its start does not.
+//! identified by its starting reading's record location: its end moves as
+//! later readings arrive, its start does not.
 use crate::derived_event::derived;
 use crate::{
     AffectedRange, Computed, Env, InputQuery, InputRange, KeyState, KeyView, Keyed, Kind, Neighbour,
@@ -238,7 +238,7 @@ fn interval_id(state_kind: &str, open: &Open<'_>) -> String {
             output_index,
         } => format!(
             "{state_kind}:{subject}:{}:{}:{output_index}",
-            location.material, location.anchor
+            location.material, location.record_offset
         ),
         Origin::Derived { .. } => format!("{state_kind}:{subject}:ts:{}", open.at.unix_ns()),
     }

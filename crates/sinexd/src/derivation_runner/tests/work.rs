@@ -4,14 +4,14 @@ use super::*;
 use sinex_derivations::work::{ActivityDays, ContextPacks, WorkActs, WorkEpisodes};
 use sinex_model::event_types::work::{ContextPack, WorkAct, WorkEpisode};
 
-fn record(kind: &str, payload: Value, anchor: u64) -> Event {
+fn record(kind: &str, payload: Value, record_offset: u64) -> Event {
     if kind.starts_with("polylogue.") {
-        return external::record(kind, payload, location(anchor));
+        return external::record(kind, payload, location(record_offset));
     }
     (sinex_model::event_types::find(kind).unwrap().build)(
         &payload,
         "synthetic.work",
-        location(anchor),
+        location(record_offset),
         ReadingOrder(0),
         *blake3::hash(&serde_json::to_vec(&payload).unwrap()).as_bytes(),
         Class::Open,
@@ -274,9 +274,7 @@ async fn an_open_wake_day_updates_for_later_spans_without_dirtying_itself(
 }
 
 #[devkit::test]
-async fn complete_snapshot_replacement_retires_omitted_calls_turns_and_empty_session(
-    db: devkit::pg::TestDatabase,
-) {
+async fn snapshot_replacement_archives_omitted_calls_and_turns(db: devkit::pg::TestDatabase) {
     let w = world(db).await;
     let mut full = snapshot("a", "task", &[0], 1);
     full.payload["record"]["snapshot"]["calls"] = json!([{"entry_id":"fixture-entry:edit","call":"call:edit","physical_session":"a","session":"a","action":"file_edit","path":"/synthetic/repo/lib.rs","at":at(1),"at_evidence":{"quality":"intrinsic","precision":"instant"},"result_at":at(2),"result_at_evidence":{"quality":"intrinsic","precision":"instant"},"outcome":{"kind":"ok"}}]);

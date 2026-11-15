@@ -24,7 +24,7 @@ impl Ingest {
             .map_err(|error| Check::Bytes(error.to_string()))?;
         if descriptor.hash.to_string() != *blob || descriptor.stored_len != *total {
             return Err(Check::Bytes(
-                "encoded chunk differs from its logical name or stored length".into(),
+                "encoded chunk differs from its blob hash or stored length".into(),
             ));
         }
         let data = base64::engine::general_purpose::STANDARD
@@ -110,7 +110,8 @@ impl Ingest {
         frame: &str,
         material: &MaterialFrame,
     ) -> Result<(), Check> {
-        self.native_declaration(producer, &material.source).await?;
+        self.built_in_declaration(producer, &material.source)
+            .await?;
         if self
             .blobs
             .contains(&material.blob)

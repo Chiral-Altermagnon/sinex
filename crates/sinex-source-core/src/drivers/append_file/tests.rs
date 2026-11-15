@@ -119,7 +119,7 @@ fn a_rewrite_reads_only_records_the_previous_revision_did_not_hold() {
         n.removed,
         vec![RecordLocation {
             material: m.id,
-            anchor: 2
+            record_offset: 2
         }],
         "the dropped \"b\" is reported where it was read"
     );
@@ -597,7 +597,7 @@ fn generated_write_histories_are_classified_and_nothing_is_missed() {
     }
 }
 
-/// A middle edit beyond the ordinary part size still changes the prefix.
+/// A middle edit beyond the default part size still changes the prefix.
 #[devkit::test]
 fn large_prefixes_are_hashed_whole_without_changing_the_digest_at_a_part_boundary() {
     let mut file = tempfile::tempfile().unwrap();

@@ -79,7 +79,7 @@ pub(crate) async fn admit_search_kinds(
                 Origin::Record {
                     location: RecordLocation {
                         material: MaterialId::new(),
-                        anchor: 0,
+                        record_offset: 0,
                     },
                     output_index: 0,
                 },
@@ -202,7 +202,7 @@ async fn sealed_and_empty_text_still_advance_search_position(db: devkit::pg::Tes
             sinex_model::Origin::Record {
                 location: sinex_model::RecordLocation {
                     material: sinex_model::MaterialId::new(),
-                    anchor: 0,
+                    record_offset: 0,
                 },
                 output_index: 0,
             },
@@ -251,8 +251,8 @@ async fn sealed_and_empty_text_still_advance_search_position(db: devkit::pg::Tes
     );
     let wrong_key = sinex_sealing::new_key().unwrap();
     assert!(sinex_sealing::unseal_payload(&sealed_payload, &wrong_key.key).is_err());
-    // Rebuilding the read model starts empty, while canonical policy outputs
-    // retain the actual sealed class and payload with no searchable text.
+    // Rebuilding the read model starts empty, while stored policy outputs
+    // keep the sealed class and payload with no searchable text.
     sqlx::query("DELETE FROM core.search_text")
         .execute(&mut conn)
         .await
@@ -312,7 +312,7 @@ async fn search_refused_text_passes(db: devkit::pg::TestDatabase) {
                 sinex_model::Origin::Record {
                     location: sinex_model::RecordLocation {
                         material: sinex_model::MaterialId::new(),
-                        anchor: n as u64,
+                        record_offset: n as u64,
                     },
                     output_index: 0,
                 },

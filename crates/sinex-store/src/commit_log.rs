@@ -1,9 +1,9 @@
 //! Committed events and lifecycle changes share the global commit position.
-//! [`changes_page`] is the canonical ordered feed, including completion markers
+//! [`changes_page`] is the ordered feed, including completion markers
 //! for scalar checkpoints and named gaps for unknown historical metadata.
-//! [`after`] is the event-only projection used by internal event derivations.
-//! A tombstone retains positions and payload-free lifecycle history; exact
-//! stream placements are tracked per native stream incarnation for erasure.
+//! [`after`] is the event-only view used by internal event derivations.
+//! A tombstone keeps positions and payload-free lifecycle history; each
+//! event's stream sequences are tracked per stream instance for erasure.
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,12 +17,12 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod changes;
-mod origin;
+mod stream_start;
 pub use changes::{
     Change, ChangeCursor, ChangePage, CommittedChange, EventHeader, HistoryGap, LifecycleChange,
-    StreamEvent, Tombstone, changes_page, stream_changes_after_origin,
+    StreamEvent, Tombstone, changes_page, stream_changes_after_start,
 };
-pub use origin::HistoryOrigin;
+pub use stream_start::StreamStart;
 
 /// Take a lifecycle position while holding the same counter lock as admission.
 pub(crate) async fn allocate_position(conn: &mut PgConnection) -> Result<i64> {
@@ -40,7 +40,7 @@ pub(crate) async fn allocate_position(conn: &mut PgConnection) -> Result<i64> {
     Ok(position)
 }
 
-/// Payload-free retained erasure metadata. Historical missing values stay unknown.
+/// Payload-free metadata kept for erasure. Historical missing values stay unknown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErasedReading {
     pub event_type: String,
@@ -76,7 +76,7 @@ pub struct Committed {
     pub source: String,
     pub run_id: Uuid,
     pub material_id: Option<Uuid>,
-    pub anchor: Option<i64>,
+    pub record_offset: Option<i64>,
     pub output_index: i64,
     pub parents: Option<Vec<Uuid>>,
     pub ts_orig: Option<OffsetDateTime>,
@@ -141,7 +141,7 @@ pub async fn after(conn: &mut PgConnection, after: i64, limit: i64, bytes: i64) 
             source,
             run_id,
             material_id: row.material_id,
-            anchor: row.anchor,
+            record_offset: row.record_offset,
             output_index: row
                 .output_index
                 .ok_or_else(|| Error::Invalid("event has no output index".into()))?,
@@ -184,14 +184,15 @@ pub async fn after(conn: &mut PgConnection, after: i64, limit: i64, bytes: i64) 
 }
 
 impl Committed {
-    /// Reconstruct the exact stored reading, including outside kinds.
+    /// Reconstruct the stored reading, including outside kinds.
     pub fn to_event(&self) -> Result<Event> {
-        let origin = match (&self.material_id, self.anchor, &self.parents) {
-            (Some(material), Some(anchor), _) => Origin::Record {
+        let origin = match (&self.material_id, self.record_offset, &self.parents) {
+            (Some(material), Some(record_offset), _) => Origin::Record {
                 location: RecordLocation {
                     material: MaterialId(*material),
-                    anchor: u64::try_from(anchor)
-                        .map_err(|_| Error::Invalid(format!("negative anchor on {}", self.id)))?,
+                    record_offset: u64::try_from(record_offset).map_err(|_| {
+                        Error::Invalid(format!("negative record offset on {}", self.id))
+                    })?,
                 },
                 output_index: u64::try_from(self.output_index)
                     .map_err(|_| Error::Invalid(format!("negative output_index on {}", self.id)))?,
@@ -340,7 +341,7 @@ pub async fn rewind_consumer_position(
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredFrame {
     pub number: i64,
-    /// The material's read authority, one descriptor per extent in order.
+    /// Where the material's bytes are read from, one descriptor per extent in order.
     pub material_extents: Option<Vec<Vec<u8>>>,
     pub producer: String,
     pub frame: String,
@@ -356,7 +357,7 @@ pub struct StoredFrame {
 /// columns beside it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameOutcome {
-    /// `blake3:<hex>` of the logical frame body recorded under this name;
+    /// `blake3:<hex>` of the frame body recorded under this name;
     /// unknown for frames recorded before Sinex kept it.
     pub content_hash: Option<String>,
     #[serde(flatten)]
@@ -422,7 +423,7 @@ pub async fn frames(
     .await?)
 }
 
-/// A transfer page of immutable receipts owned by this authenticated producer.
+/// A transfer page of the frames recorded for this authenticated producer.
 pub async fn frames_page(
     conn: &mut PgConnection,
     producer: &str,
@@ -647,7 +648,7 @@ pub async fn record_replay_frame(
 #[cfg(test)]
 mod tests;
 
-/// Reserve the existing receipt identity inside the owning admission transaction.
+/// Reserve a frame number inside the admission transaction that records the frame.
 pub async fn reserve_frame_number(conn: &mut PgConnection) -> Result<i64> {
     Ok(
         sqlx::query_scalar(
@@ -658,10 +659,10 @@ pub async fn reserve_frame_number(conn: &mut PgConnection) -> Result<i64> {
     )
 }
 
-/// Original own MATERIAL custody and its immutable receipt provenance. Nullable
-/// legacy fields remain nullable; current grants never backfill their meaning.
+/// A MATERIAL frame's stored material and the frame Sinex recorded for it.
+/// Fields that older-format frames lack stay null; current grants never fill them in.
 pub struct RecordedMaterial {
-    pub receipt: StoredFrame,
+    pub stored_frame: StoredFrame,
     pub blob: Option<String>,
     pub length: Option<i64>,
     pub source_name: Option<String>,
@@ -686,7 +687,7 @@ pub async fn recorded_material(
         WHERE f.producer=$1 AND f.frame=$2"#,producer,frame)
         .fetch_optional(conn).await?;
     Ok(row.map(|row| RecordedMaterial {
-        receipt: StoredFrame {
+        stored_frame: StoredFrame {
             number: row.number,
             material_extents: row.material_extents,
             producer: row.producer,

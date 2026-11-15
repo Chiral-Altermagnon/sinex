@@ -55,31 +55,31 @@ async fn public_policy_is_available_only_for_one_committed_config_and_exposes_co
         public_host_policy(&mut conn, "fixture", false, "configured-day-policy", at)
             .await
             .unwrap(),
-        HostPolicyProjection::Unavailable { .. }
+        HostPolicyView::Unavailable { .. }
     ));
     assert!(matches!(
         public_host_policy(&mut conn, "fixture", true, "configured-day-policy", at)
             .await
             .unwrap(),
-        HostPolicyProjection::Pending { .. }
+        HostPolicyView::Pending { .. }
     ));
     let state = checkpoint(at);
     let mut tx = conn.begin().await.unwrap();
     assert_eq!(save(&mut tx, "fixture", None, &state).await.unwrap(), 1);
     tx.commit().await.unwrap();
-    let projection = public_host_policy(&mut conn, "fixture", true, "configured-day-policy", at)
+    let view = public_host_policy(&mut conn, "fixture", true, "configured-day-policy", at)
         .await
         .unwrap();
     assert_eq!(
-        projection,
-        HostPolicyProjection::Available {
+        view,
+        HostPolicyView::Available {
             checkpoint_revision: 1,
             settings_identity: "configured-day-policy".into(),
             quiet_hours: Some(::signals::QuietHours {
                 from: 1320,
                 to: 480
             }),
-            interrupt_budget: InterruptBudgetProjection {
+            interrupt_budget: InterruptBudgetView {
                 per_hour: 2,
                 used: 1,
                 remaining: 1,
@@ -88,7 +88,7 @@ async fn public_policy_is_available_only_for_one_committed_config_and_exposes_co
             observed_at: at
         }
     );
-    let public = serde_json::to_value(projection).unwrap();
+    let public = serde_json::to_value(view).unwrap();
     for private in [
         "evaluator",
         "host",

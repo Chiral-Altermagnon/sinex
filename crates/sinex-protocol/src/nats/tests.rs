@@ -104,7 +104,7 @@ fn confirmed_readings_require_their_record_hash_and_order() {
         reading_order: 17,
         record_hash: "00".repeat(32),
         payload: serde_json::json!({}),
-        projection: crate::ProjectionIdentity::for_payload(&serde_json::json!({})),
+        payload_identity: crate::PayloadIdentity::for_payload(&serde_json::json!({})),
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(
@@ -233,7 +233,7 @@ fn recorded_continuations_are_optional_comparisons_without_an_identity_override(
         "source",
         "family",
         "allowed",
-        "owner_instance",
+        "daemon_instance",
         "scope",
     ] {
         let mut forged = request.clone();
@@ -246,7 +246,7 @@ fn recorded_continuations_are_optional_comparisons_without_an_identity_override(
 }
 
 #[devkit::test]
-fn backup_reply_authority_does_not_alias_any_ordinary_producer_inbox() {
+fn backup_reply_inbox_is_apart_from_producer_inboxes() {
     let subjects = Subjects::sinex();
     let (publish, subscribe) = subjects.producer_permissions("backup", None);
     assert!(

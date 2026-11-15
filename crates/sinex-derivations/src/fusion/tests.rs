@@ -18,7 +18,7 @@ pub(crate) fn captured<P: EventPayload>(payload: &P, source: &str, class: Class)
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -647,7 +647,7 @@ fn kitty_end(execution: Option<&str>, command: &str, host: &str, secs: f64) -> E
     )
 }
 
-/// The token the shell integration mints for a command started at `secs`.
+/// The token the shell integration makes for a command started at `secs`.
 fn token(secs: f64, n: u32) -> String {
     let ms = (secs * 1000.0) as u64;
     format!(
@@ -696,20 +696,21 @@ fn a_token_read_stops_at_the_tokens_lifetime() {
     // At the command's end, within the window's slack, it joins.
     let end = kitty_end(Some(&execution), "make", "box", started + 6.0);
     assert_eq!(fuse(commands(), &[report, end]).len(), 1);
-    // The bounds the read takes: from the mint time to the end, widened by
-    // the family's window.
+    // The bounds the read takes: from the time the token was made to the end,
+    // widened by the family's window.
+
     let lifetime = sinex_model::TokenLifetime {
         length: commands().token_length,
         slack_ns: commands().window_ns.unwrap(),
     };
-    let minted = i128::from(sinex_model::uuid7_millisecond(&execution).unwrap()) * 1_000_000;
+    let made_ns = i128::from(sinex_model::uuid7_millisecond(&execution).unwrap()) * 1_000_000;
     assert_eq!(
         lifetime.bounds(
             &execution,
-            minted,
+            made_ns,
             &json!({"duration_ns": 5_000_000_000_i64})
         ),
-        (minted - 2_000_000_000, minted + 7_000_000_000)
+        (made_ns - 2_000_000_000, made_ns + 7_000_000_000)
     );
 }
 
@@ -1090,7 +1091,7 @@ fn a_decision_survives_replay_of_either_side() {
     reread.id = EventId::new();
     if let Origin::Record { location, .. } = &mut reread.origin {
         location.material = MaterialId::new();
-        location.anchor = 900;
+        location.record_offset = 900;
     }
     assert_eq!(record_identity(&reread), record_identity(&z));
     let mut replayed = a.clone();

@@ -12,7 +12,7 @@ use serde_json::Value;
 pub struct RecordLocation {
     pub material: MaterialId,
     /// Byte offset of the record's first byte within the material.
-    pub anchor: u64,
+    pub record_offset: u64,
 }
 
 /// Which of two readings of one record is newer. Each source defines it so it
@@ -86,7 +86,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Build an event from a typed payload. The ID is minted here and never
+    /// Build an event from a typed payload. The ID is assigned here and never
     /// derived from content.
     pub fn build<P: EventPayload>(
         payload: &P,
@@ -132,7 +132,7 @@ impl Event {
         })
     }
 
-    /// An outside reading awaiting the writer's exact declaration checks.
+    /// An outside reading awaiting the writer's declaration checks.
     pub fn submitted(
         kind: crate::KindRef,
         payload: Value,

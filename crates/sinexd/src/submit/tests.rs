@@ -46,7 +46,7 @@ async fn request_run(conn: &mut PgConnection, expected_events: i64) {
     let linked: i64 = sqlx::query_scalar("SELECT count(*) FROM core.events e JOIN core.runs r ON r.id=e.run_id JOIN core.manifests m ON m.id=r.manifest_id WHERE m.name='forecast.request'").fetch_one(conn).await.unwrap();
     assert_eq!(
         linked, expected_events,
-        "stored request events name their actual producer manifest"
+        "stored request events name their producer manifest"
     );
 }
 
@@ -125,11 +125,12 @@ async fn request_commits_its_records_together_with_the_source_class(db: devkit::
     .await
     .unwrap();
     assert_eq!(submitted.outcome.admitted, 2);
-    let rows: Vec<(uuid::Uuid, String, serde_json::Value)> =
-        sqlx::query_as("SELECT material_id, class::text, payload FROM core.events ORDER BY anchor")
-            .fetch_all(&mut ctx.read_conn)
-            .await
-            .unwrap();
+    let rows: Vec<(uuid::Uuid, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT material_id, class::text, payload FROM core.events ORDER BY record_offset",
+    )
+    .fetch_all(&mut ctx.read_conn)
+    .await
+    .unwrap();
     assert_eq!(rows.len(), 2);
     for (material, class, payload) in rows {
         assert_eq!(Some(MaterialId(material)), submitted.material);
@@ -154,7 +155,7 @@ async fn submission_checks_again_inside_the_writer(db: devkit::pg::TestDatabase)
     .unwrap();
     let stopped = Arc::new(AtomicBool::new(false));
     let checked_stop = stopped.clone();
-    let result = Intake {
+    let result = Submitter {
         host: None,
         writer: &ctx.writer,
         source: Arc::new(forecast::request_source()),
@@ -300,7 +301,7 @@ async fn overlap(fail_first: bool) {
     let dir = tempfile::tempdir().unwrap();
     let blobs = Blobs::open(dir.path()).unwrap();
     let (writer, _queues) = crate::writer::channels();
-    let intake = Intake {
+    let submitter = Submitter {
         host: None,
         writer: &writer,
         source: Arc::new(source),
@@ -314,9 +315,9 @@ async fn overlap(fail_first: bool) {
         registered: None,
     };
     let mut submitted = 0;
-    let mut anchors = Vec::new();
+    let mut record_offsets = Vec::new();
     let mut totals = Totals::default();
-    let result = intake
+    let result = submitter
         .submit_using(
             three_records(),
             Value::Null,
@@ -330,7 +331,7 @@ async fn overlap(fail_first: bool) {
                     RecordOutcome::Events { location, .. } => location.unwrap(),
                     RecordOutcome::Failure { .. } => panic!("synthetic records must parse"),
                 };
-                anchors.push(location.anchor);
+                record_offsets.push(location.record_offset);
                 async move {
                     check()?;
                     if first {
@@ -363,7 +364,7 @@ async fn overlap(fail_first: bool) {
     } else {
         assert_eq!(result.unwrap().outcome.admitted, 3);
         assert_eq!(submitted, 3);
-        assert!(anchors.windows(2).all(|a| a[0] < a[1]));
+        assert!(record_offsets.windows(2).all(|a| a[0] < a[1]));
     }
 }
 
@@ -474,7 +475,7 @@ async fn queued_submission(db: devkit::pg::TestDatabase, cancel: bool, source_pu
     let blobs = Blobs::open(dir.path()).unwrap();
     let url = db.url(None);
     let mut connection = sinex_store::AdmissionContext::connect(&url).await.unwrap();
-    crate::catalog::install_native_sources(&mut connection)
+    crate::catalog::install_built_in_sources(&mut connection)
         .await
         .unwrap();
     let (writer, queues) = crate::writer::channels();
@@ -490,7 +491,7 @@ async fn queued_submission(db: devkit::pg::TestDatabase, cancel: bool, source_pu
         closed: Arc::new(AtomicBool::new(false)),
     };
     let mut submission = tokio::spawn(async move {
-        let intake = Intake {
+        let submitter = Submitter {
             host: None,
             writer: &worker_writer,
             source: Arc::new(source),
@@ -504,7 +505,7 @@ async fn queued_submission(db: devkit::pg::TestDatabase, cancel: bool, source_pu
             registered: None,
         };
         let mut first = true;
-        intake
+        submitter
             .submit_using(
                 three_records(),
                 Value::Null,
@@ -544,7 +545,7 @@ async fn queued_submission(db: devkit::pg::TestDatabase, cancel: bool, source_pu
     .unwrap();
     let publication = writer.source_publication();
     let mut pause = Box::pin(publication.pause());
-    // Queueing source work retains publication until the durable answer.
+    // Queued source work holds publication until its answer is committed.
     if source_publication {
         assert!(matches!(
             futures::poll!(pause.as_mut()),
@@ -619,9 +620,7 @@ async fn dropping_a_submission_refuses_its_queued_batch(db: devkit::pg::TestData
 }
 
 #[devkit::test]
-async fn backup_pauses_between_source_batches_after_the_durable_answer(
-    db: devkit::pg::TestDatabase,
-) {
+async fn backup_pauses_between_batches_after_commit(db: devkit::pg::TestDatabase) {
     queued_submission(db, false, true).await;
 }
 

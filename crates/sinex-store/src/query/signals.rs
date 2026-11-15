@@ -1,11 +1,11 @@
-//! Standing queries use the ordinary binder/compiler and retain its complete order.
+//! Standing queries use the query binder and compiler and keep its complete order.
 use super::*;
 use serde::{Deserialize, Serialize};
 use sinex_model::{Class, EventId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignalRow {
-    /// Compiler identity for groups and metadata, native coordinates for events.
+    /// Compiler identity for groups and metadata, record coordinates or key for events.
     pub identity: String,
     pub reference: Option<String>,
     pub event: Option<EventId>,
@@ -42,7 +42,7 @@ pub async fn standing_query(
         let definitions = saved::saved_definitions(conn, &name).await?;
         sinex_model::query::saved::bind_saved(text, &ctx, &definitions)?
     } else {
-        sinex_model::query::native::parse(text, &ctx)?.bind(&ctx)?
+        sinex_model::query::template::parse(text, &ctx)?.bind(&ctx)?
     };
     ctx.catalog
         .as_ref()
@@ -82,8 +82,8 @@ pub async fn standing_query(
             None => selection.filter(),
         });
     }
-    // A delivery and its retained evaluation are observations of this mechanism,
-    // never new source evidence for another rule.
+    // A delivery and its stored evaluation are observations of this mechanism,
+    // never new source data for another rule.
     if bound.source.table().is_events() {
         let exclude = Expr::Not(Box::new(Expr::Compare {
             lhs: Operand::Field(FieldRef::Field(
@@ -183,13 +183,13 @@ pub async fn standing_query(
     } else {
         Class::Open
     };
-    let owner_key = crate::store_secret::key(conn).await?;
-    let identity_key = blake3::derive_key("sinex.owner_protocol.signal_occurrence.v1", &owner_key);
+    let secret = crate::store_secret::key(conn).await?;
+    let identity_key = blake3::derive_key("sinex.owner_protocol.signal_occurrence.v1", &secret);
     let mut rows = Vec::with_capacity(values.len());
     for mut value in values {
         let identity = value["identity"]
             .as_str()
-            .ok_or_else(|| Error::Invalid("signal query lost its native row identity".into()))?
+            .ok_or_else(|| Error::Invalid("signal query lost its row identity".into()))?
             .to_owned();
         let mut row = SignalRow {
             identity,
@@ -205,7 +205,7 @@ pub async fn standing_query(
                 .identity
                 .parse()
                 .map_err(|_| Error::Invalid("signal event row has no reading identity".into()))?;
-            let details=sqlx::query!(r#"SELECT jsonb_build_object('material',original.material_id,'anchor',original.anchor,'output',original.output_index,'source',original.source,'kind',original.event_type,'key',original.equivalence_key,'observed',visible.ts_coided,'start',visible.ts_orig,'payload',visible.payload) AS "details!",visible.class::text AS "class!" FROM core.visible_events visible JOIN core.events original ON original.id=visible.id WHERE visible.id=$1"#,id).fetch_optional(&mut *conn).await?;
+            let details=sqlx::query!(r#"SELECT jsonb_build_object('material',original.material_id,'record_offset',original.record_offset,'output',original.output_index,'source',original.source,'kind',original.event_type,'key',original.equivalence_key,'observed',visible.ts_coided,'start',visible.ts_orig,'payload',visible.payload) AS "details!",visible.class::text AS "class!" FROM core.visible_events visible JOIN core.events original ON original.id=visible.id WHERE visible.id=$1"#,id).fetch_optional(&mut *conn).await?;
             let Some(details) = details else {
                 return Err(Error::Invalid(
                     "signal query reading became unavailable".into(),
@@ -218,13 +218,13 @@ pub async fn standing_query(
                     .map_err(|error| Error::Invalid(error.to_string()))?,
             );
             row.event = Some(EventId(id));
-            let native = if let Some(key) = details["key"].as_str() {
+            let natural_key = if let Some(key) = details["key"].as_str() {
                 serde_json::json!(["key", details["source"], details["kind"], key])
             } else if details["material"].is_string() {
                 serde_json::json!([
                     "record",
                     details["material"],
-                    details["anchor"],
+                    details["record_offset"],
                     details["output"]
                 ])
             } else {
@@ -235,7 +235,7 @@ pub async fn standing_query(
                 "native:{}",
                 blake3::keyed_hash(
                     &identity_key,
-                    &serde_json::to_vec(&native)
+                    &serde_json::to_vec(&natural_key)
                         .map_err(|error| Error::Invalid(error.to_string()))?
                 )
             );
@@ -263,7 +263,7 @@ pub async fn standing_query(
         rows,
         class,
         complete,
-        reason: (!complete).then(|| "sealed_query_requires_available_plaintext_evidence".into()),
+        reason: (!complete).then(|| "sealed_query_requires_available_plaintext".into()),
         live,
         read_as: seq,
         parents,

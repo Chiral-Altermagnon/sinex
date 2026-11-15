@@ -6,7 +6,7 @@ async fn header_batches_preserve_order_duplicates_and_classes_on_compressed_hist
     db: devkit::pg::TestDatabase,
 ) {
     let mut conn = PgConnection::connect(&db.url(None)).await.unwrap();
-    conn.execute("INSERT INTO core.events(id,event_type,source,run_id,material_id,anchor,ts_quality,commit_seq,payload,reading_order,record_hash,class)
+    conn.execute("INSERT INTO core.events(id,event_type,source,run_id,material_id,record_offset,ts_quality,commit_seq,payload,reading_order,record_hash,class)
       SELECT ('01800000-0000-7000-8000-'||lpad(to_hex(n),12,'0'))::uuid,
         'command.imported','synthetic-header',uuidv7(),uuidv7(),n,'unknown',1,'{}',1,decode(repeat('01',32),'hex'),
         CASE n%3 WHEN 0 THEN 'guarded' WHEN 1 THEN 'sealed' ELSE 'open' END
@@ -15,11 +15,11 @@ async fn header_batches_preserve_order_duplicates_and_classes_on_compressed_hist
         .execute(&mut conn)
         .await
         .unwrap();
-    let logical_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM core.events")
+    let row_count: i64 = sqlx::query_scalar("SELECT count(*) FROM core.events")
         .fetch_one(&mut conn)
         .await
         .unwrap();
-    assert_eq!(logical_rows, 8448);
+    assert_eq!(row_count, 8448);
     let mut ids: Vec<Uuid> = (8193..=8448)
         .rev()
         .map(|n| Uuid::parse_str(&format!("01800000-0000-7000-8000-{n:012x}")).unwrap())
@@ -29,7 +29,7 @@ async fn header_batches_preserve_order_duplicates_and_classes_on_compressed_hist
     ids.push(missing);
     let mut tx = conn.begin().await.unwrap();
     {
-        let headers = <EventHeader as EventProjection>::load(&mut tx, &ids)
+        let headers = <EventHeader as EventRows>::load(&mut tx, &ids)
             .await
             .unwrap();
         assert_eq!(

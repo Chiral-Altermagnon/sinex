@@ -65,7 +65,7 @@ fn journal_from(secs: i64, priority: u8, from_sinex: bool) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -448,7 +448,7 @@ fn activity_seconds_use_supported_presence_and_keep_afk_claims_as_inputs_only() 
         "presence.intervals",
         [&parent],
     );
-    let claim = Event::build(
+    let report = Event::build(
         &PresenceSpan {
             scope: None,
             host: None,
@@ -462,7 +462,7 @@ fn activity_seconds_use_supported_presence_and_keep_afk_claims_as_inputs_only() 
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -471,6 +471,6 @@ fn activity_seconds_use_supported_presence_and_keep_afk_claims_as_inputs_only() 
         Class::Open,
     )
     .unwrap();
-    let out = hourly("activity.active_seconds", &[present, claim], 100_000);
+    let out = hourly("activity.active_seconds", &[present, report], 100_000);
     assert_eq!(total_at(&out, 0).value, Some(20.0));
 }

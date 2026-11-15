@@ -154,7 +154,7 @@ pub struct DrainInput<'a> {
     pub records: &'a [(usize, usize)],
     /// The carried state before the first record.
     pub carry: Value,
-    /// Which of two readings is newer, by the record's anchor.
+    /// Which of two readings is newer, by the record's offset.
     pub reading_order: &'a (dyn Fn(usize) -> ReadingOrder + Sync),
     pub limits: Limits,
     /// The material's manifest. Its members (archive member streams,
@@ -195,13 +195,13 @@ impl RecordContext<'_> {
         hash.update(b"record path\0");
         hash.update(bytes_hash.as_bytes());
         hash.update(path.as_bytes());
-        let native = self
+        let path_bytes = self
             .member
             .and_then(|member| member.details.get("native_path_bytes"))
             .unwrap_or_else(|| self.manifest.detail("native_path_bytes"));
-        if let Some(native) = native.as_str() {
+        if let Some(path_bytes) = path_bytes.as_str() {
             hash.update(b"\0native_path_bytes\0");
-            hash.update(native.as_bytes());
+            hash.update(path_bytes.as_bytes());
         }
         if let Some(node) = self.member.and_then(|member| member.node.as_ref()) {
             hash.update(b"\0file node\0");
@@ -373,7 +373,7 @@ impl<'a, P: Parser> Drainer<'a, P> {
         let input = &self.input;
         let location = RecordLocation {
             material: input.material,
-            anchor: start as u64,
+            record_offset: start as u64,
         };
         match parsed {
             Ok((payloads, next)) => {

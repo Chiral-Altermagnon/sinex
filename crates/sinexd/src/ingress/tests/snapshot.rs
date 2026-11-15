@@ -31,7 +31,7 @@ async fn setup(
 ) -> (Harness, MaterialId, Vec<EventId>) {
     let kind = declaration();
     let grants = crate::ingress::fetch::Grants {
-        indexed_catalog: Some(sinex_model::ProjectionCatalog {
+        indexed_catalog: Some(sinex_model::SnapshotCatalog {
             name: "synthetic-catalog".into(),
             version: 1,
             kinds: vec![kind.clone()],
@@ -74,7 +74,7 @@ async fn setup(
             payload: json!({"id":format!("message-{index}"),"text":"synthetic"}),
             location: Some(RecordLocation {
                 material,
-                anchor: 0,
+                record_offset: 0,
             }),
             output_index: u64::try_from(index).unwrap(),
             parents: vec![],
@@ -82,7 +82,7 @@ async fn setup(
             class,
         })
         .collect();
-    let receipt = h
+    let ack = h
         .send(
             "synthetic",
             &Ingress::Events {
@@ -93,8 +93,8 @@ async fn setup(
             },
         )
         .await;
-    assert_eq!(receipt.refusal(), None);
-    (h, material, receipt.admitted().to_vec())
+    assert_eq!(ack.refusal(), None);
+    (h, material, ack.admitted().to_vec())
 }
 
 async fn page(h: &Harness, producer: &str, cursor: Option<SnapshotCursor>) -> SnapshotReply {
@@ -154,7 +154,7 @@ async fn snapshot_pages_read_one_position_and_complete_with_their_stream_start(
         payload: json!({"id":"message-0","text":"later reading"}),
         location: Some(RecordLocation {
             material,
-            anchor: 0,
+            record_offset: 0,
         }),
         output_index: 0,
         parents: vec![],
@@ -306,7 +306,7 @@ fn consumer(after: i64, start: Option<SnapshotStart>, status_only: bool) -> Conf
 }
 
 #[devkit::test]
-async fn a_fresh_origin_requires_a_snapshot_and_its_start_provisions(db: devkit::pg::TestDatabase) {
+async fn fresh_stream_requires_snapshot_then_provisions(db: devkit::pg::TestDatabase) {
     let (h, _, admitted) = setup(db, 1, sinex_model::Class::Open).await;
     let js = crate::publisher::context(h.client.clone());
     let mut conn = PgConnection::connect(&h.url).await.unwrap();
@@ -316,18 +316,18 @@ async fn a_fresh_origin_requires_a_snapshot_and_its_start_provisions(db: devkit:
     crate::publisher::ensure_stream(&mut conn, &js, &h.subjects)
         .await
         .unwrap();
-    let origin = crate::publisher::history_origin(
+    let stream_start = crate::publisher::read_stream_start(
         &js.get_stream(h.subjects.confirmed_stream()).await.unwrap(),
     )
     .unwrap();
-    assert!(origin.requires_snapshot);
-    assert!(origin.position > 0);
-    for after in [0, origin.position] {
+    assert!(stream_start.requires_snapshot);
+    assert!(stream_start.position > 0);
+    for after in [0, stream_start.position] {
         assert!(matches!(
             h.requests
                 .confirmed_consumer("synthetic", &consumer(after, None, false))
                 .await,
-            ConfirmedConsumerReply::SnapshotRequired { origin: p, .. } if p == origin.position
+            ConfirmedConsumerReply::SnapshotRequired { origin: p, .. } if p == stream_start.position
         ));
     }
     let SnapshotReply::Page {
@@ -338,7 +338,7 @@ async fn a_fresh_origin_requires_a_snapshot_and_its_start_provisions(db: devkit:
         panic!("one complete page")
     };
     assert_eq!(ids(&events), admitted);
-    assert_eq!(complete.position, origin.position);
+    assert_eq!(complete.position, stream_start.position);
     let start = SnapshotStart {
         stream_instance: complete.stream_instance.clone(),
         last: complete.last.clone(),

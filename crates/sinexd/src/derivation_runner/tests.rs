@@ -19,11 +19,11 @@ fn at(secs: i64) -> Timestamp {
     Timestamp::from_unix_secs(T + secs).unwrap()
 }
 
-fn location(anchor: u64) -> Origin {
+fn location(record_offset: u64) -> Origin {
     Origin::Record {
         location: RecordLocation {
             material: MaterialId::new(),
-            anchor,
+            record_offset,
         },
         output_index: 0,
     }
@@ -55,7 +55,7 @@ fn atuin(id: &str, command: &str, secs: i64, exit: i64, order: i64) -> Event {
     .unwrap()
 }
 
-fn zsh(command: &str, secs: i64, anchor: u64) -> Event {
+fn zsh(command: &str, secs: i64, record_offset: u64) -> Event {
     Event::build(
         &CommandImported {
             command: command.into(),
@@ -66,7 +66,7 @@ fn zsh(command: &str, secs: i64, anchor: u64) -> Event {
             n: 0,
         },
         "terminal.zsh-history",
-        location(anchor),
+        location(record_offset),
         ReadingOrder(0),
         *blake3::hash(command.as_bytes()).as_bytes(),
         Class::Open,
@@ -343,7 +343,7 @@ async fn an_open_interval_waits_and_closes_on_the_next_transition(db: devkit::pg
 }
 
 /// A derivation with one key per command, each always waiting for more
-/// evidence.
+/// input.
 struct Waiting;
 
 impl Keyed for Waiting {
@@ -392,7 +392,7 @@ impl Keyed for Waiting {
 }
 
 #[devkit::test]
-async fn a_waiting_key_remains_eligible_for_late_evidence(db: devkit::pg::TestDatabase) {
+async fn waiting_key_remains_eligible_for_late_input(db: devkit::pg::TestDatabase) {
     let w = World::with_keys(db, vec![Box::new(Waiting)]).await;
     let waiting = "SELECT count(*) FROM derivation.waiting";
     w.admit(vec![zsh("a", 0, 1)]).await;
@@ -406,7 +406,7 @@ async fn a_waiting_key_remains_eligible_for_late_evidence(db: devkit::pg::TestDa
     d.catch_up().await.unwrap();
     assert_eq!(w.count(waiting).await, 2);
 
-    // Elapsed time does not supply the missing evidence.
+    // Elapsed time does not supply the missing input.
     d.clock = Some(Timestamp(Timestamp::now().0 + time::Duration::days(30)));
     w.admit(vec![zsh("c", 20, 3)]).await;
     d.catch_up().await.unwrap();
@@ -453,7 +453,7 @@ async fn a_key_dirtied_again_stays_dirty(db: devkit::pg::TestDatabase) {
     .fetch_one(&mut conn)
     .await
     .unwrap();
-    // A settle computed before the latest dirt (dirty_seq 0) leaves the mark.
+    // A final computation before the latest dirt (dirty_seq 0) leaves the mark.
     let batch = Batch {
         run: RunId::new(),
         kind: BatchKind::Derived {
@@ -960,7 +960,7 @@ mod external;
 
 mod selected_provenance;
 
-mod retired;
+mod removed;
 
 mod tokens;
 

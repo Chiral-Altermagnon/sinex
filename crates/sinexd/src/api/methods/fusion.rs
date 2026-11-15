@@ -33,7 +33,9 @@ async fn side(conn: &mut sqlx::PgConnection, reference: &str) -> Result<Side> {
         shown["offset"].as_u64(),
         shown["output"].as_u64(),
     ) {
-        (Some(material), Some(anchor), Some(output)) => Some((material, anchor, output)),
+        (Some(material), Some(record_offset), Some(output)) => {
+            Some((material, record_offset, output))
+        }
         _ => None,
     };
     let source = text("source").ok_or_else(|| Error::not_configured("record has no source"))?;
@@ -80,7 +82,7 @@ fn family_of(a: &Side, b: &Side) -> Result<&'static Family> {
 
 /// The placement a duplicate decision needs. Library items remain separate
 /// identities regardless of their dates; fusion decisions must fit the
-/// family's actual reading so its derivation can apply them.
+/// family's reading so its derivation can apply them.
 struct PairContext {
     family: Option<&'static Family>,
     key: Option<Value>,
@@ -266,7 +268,7 @@ impl Api {
             &self.host,
             now,
         );
-        let done = crate::intake::request(
+        let done = crate::submit::request(
             &mut conn,
             writer,
             &self.blobs,
@@ -288,7 +290,7 @@ impl Api {
             &mut conn,
             sinex_model::RecordLocation {
                 material,
-                anchor: 0,
+                record_offset: 0,
             },
             0,
         )

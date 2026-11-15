@@ -26,7 +26,7 @@ pub const SPEC: SourceSpec = SourceSpec {
 };
 
 /// Host JSON lines and a producer's complete JSON frame share exact byte
-/// anchors, including pretty-printed frames and an unterminated final value.
+/// record offsets, including pretty-printed frames and an unterminated final value.
 fn frame_complete(bytes: &[u8]) -> (Vec<(usize, usize)>, usize) {
     frame(bytes, true)
 }
@@ -276,7 +276,7 @@ pub const FORMAT: sinex_source_core::binding::InputFormat =
         name: "signals",
         accepts: &[],
         discovery: sinex_source_core::discovery::DiscoverySpec {
-            owner: sinex_source_core::discovery::Owner::System,
+            captured_by: sinex_source_core::discovery::CapturedBy::System,
             locations: &[],
             capabilities: &[],
             credentials: &[],

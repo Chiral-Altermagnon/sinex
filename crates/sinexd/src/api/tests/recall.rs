@@ -1,4 +1,4 @@
-//! Recall through the public API, real writer and actual shell derivation.
+//! Recall through the public API, real writer and the shell derivation.
 use super::*;
 use sinex_derivations::{Env, Keyed, derived_event::derived, session::ShellSessions};
 use sinex_model::EventId;
@@ -169,7 +169,7 @@ async fn recall_last_pages_keep_the_selected_commit_and_equal_start_ties_are_sta
         &[(0, "/src/other", None), (1, "/src/other", None)],
         Class::Open,
     ));
-    let expected_anchor = events
+    let expected_session = events
         .iter()
         .filter(|e| e.event_type == "shell.session")
         .map(|e| e.id.to_string())
@@ -180,7 +180,7 @@ async fn recall_last_pages_keep_the_selected_commit_and_equal_start_ties_are_sta
         call_unbounded(&w, Some(READ), json!({"method":"recall","around":"last"})).await;
     assert_eq!(
         answer["result"]["recall"]["session"]["row"]["id"],
-        expected_anchor
+        expected_session
     );
     let expected = ids(&answer);
     let (_, first) = call_unbounded(
@@ -203,7 +203,7 @@ async fn recall_last_pages_keep_the_selected_commit_and_equal_start_ties_are_sta
         assert_eq!(page["result"]["resolved"]["commit_seq"], seq);
         assert_eq!(
             page["result"]["recall"]["session"]["row"]["id"],
-            expected_anchor
+            expected_session
         );
         collected.extend(ids(&page));
         cursor = page["result"]["page"]["cursor"].clone();
@@ -213,7 +213,7 @@ async fn recall_last_pages_keep_the_selected_commit_and_equal_start_ties_are_sta
         call_unbounded(&w, Some(READ), json!({"method":"recall","around":"last"})).await;
     assert_ne!(
         changed["result"]["recall"]["session"]["row"]["id"],
-        expected_anchor
+        expected_session
     );
 }
 
@@ -269,9 +269,7 @@ async fn recall_cwd_quotes_paths_and_rejects_incompatible_windows(db: devkit::pg
 }
 
 #[devkit::test]
-async fn recall_last_never_invents_a_span_from_untimed_or_withheld_evidence(
-    db: devkit::pg::TestDatabase,
-) {
+async fn recall_last_never_spans_untimed_or_withheld_readings(db: devkit::pg::TestDatabase) {
     let w = world(db).await;
     let untimed = Event::build(
         &CommandImported {
@@ -286,7 +284,7 @@ async fn recall_last_never_invents_a_span_from_untimed_or_withheld_evidence(
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -534,7 +532,7 @@ async fn recall_context_excludes_saved_definitions_but_inherits_selected_activit
         let definition = sinex_model::event_types::query::Saved {
             name: format!("synthetic-definition-{index}"),
             query: "events | fields id".into(),
-            template: sinex_model::query::native::parse(
+            template: sinex_model::query::template::parse(
                 "events | fields id",
                 &sinex_model::query::Context::utc(jiff::Timestamp::UNIX_EPOCH),
             )
@@ -550,7 +548,7 @@ async fn recall_context_excludes_saved_definitions_but_inherits_selected_activit
                 Origin::Record {
                     location: RecordLocation {
                         material: MaterialId::new(),
-                        anchor: 0,
+                        record_offset: 0,
                     },
                     output_index: 0,
                 },
@@ -566,28 +564,28 @@ async fn recall_context_excludes_saved_definitions_but_inherits_selected_activit
         .map(|event| event.id.to_string())
         .collect::<std::collections::BTreeSet<_>>();
     admit_events(&w, definitions).await;
-    let (_, ordinary) = call_unbounded(
+    let (_, saved_rows) = call_unbounded(
         &w,
         Some(READ),
         json!({"method":"query","query":"events where event_type = query.saved"}),
     )
     .await;
-    assert_eq!(ordinary["outcome"], "ok", "{ordinary}");
-    let ordinary = ordinary["result"]["rows"].as_array().unwrap();
+    assert_eq!(saved_rows["outcome"], "ok", "{saved_rows}");
+    let saved_rows = saved_rows["result"]["rows"].as_array().unwrap();
     assert_eq!(
-        ordinary
+        saved_rows
             .iter()
             .map(|row| row["id"].as_str().unwrap().to_owned())
             .collect::<std::collections::BTreeSet<_>>(),
         definition_ids
     );
     assert!(
-        ordinary
+        saved_rows
             .iter()
             .any(|row| row["payload"]["withheld"] == "guarded")
     );
     assert!(
-        ordinary
+        saved_rows
             .iter()
             .any(|row| row["payload"]["query"] == "events | fields id")
     );
@@ -657,10 +655,10 @@ async fn archived_parent_recall_is_an_explicit_historical_preview(db: devkit::pg
     let before = sinex_store::query::current_seq(&mut w.reads.acquire().await.unwrap())
         .await
         .unwrap();
-    let (_, ordinary) =
+    let (_, live_recall) =
         call_unbounded(&w, Some(READ), json!({"method":"recall","around":"last"})).await;
-    assert_eq!(ordinary["outcome"], "ok", "{ordinary}");
-    assert!(ordinary["result"]["historical_preview"].is_null());
+    assert_eq!(live_recall["outcome"], "ok", "{live_recall}");
+    assert!(live_recall["result"]["historical_preview"].is_null());
     let (_, archived) = call_unbounded(
         &w,
         Some(OPERATOR),
@@ -715,11 +713,11 @@ async fn archived_parent_recall_is_an_explicit_historical_preview(db: devkit::pg
 async fn a_stored_work_resume_card_is_shared_by_brief_and_machine_without_recomputation(
     db: devkit::pg::TestDatabase,
 ) {
-    use sinex_model::event_types::{activity::ActivityEvidence, work::ContextPack};
+    use sinex_model::event_types::{activity::CitedReading, work::ContextPack};
     let w = world(db).await;
     let mut failed = command("synthetic failing check", 0);
     failed.payload["exit_code"] = json!(1);
-    let evidence = ActivityEvidence {
+    let reading = CitedReading {
         event: failed.id,
         record: "synthetic-check".into(),
         event_type: failed.event_type.clone(),
@@ -740,10 +738,10 @@ async fn a_stored_work_resume_card_is_shared_by_brief_and_machine_without_recomp
             episode: "synthetic-objective".into(),
             at: failed.ts_orig.at.unwrap(),
             stated_goal: None,
-            trail: vec![evidence.clone()],
+            trail: vec![reading.clone()],
             last_edit: None,
             last_edit_path: None,
-            open_failures: vec![evidence],
+            open_failures: vec![reading],
             coverage: vec!["check revision and identity were not recorded".into()],
             profile: "resume/v1".into(),
         },

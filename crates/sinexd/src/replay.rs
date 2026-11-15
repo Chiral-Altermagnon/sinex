@@ -346,7 +346,7 @@ pub(crate) async fn run(
 /// Daemon replay uses the saved local binding or its named parser. An `ingress:`
 /// binding belongs to its producer, which supplies replacement readings through
 /// ReplayScopeQuery and ReplaySequence.
-struct NativeReplaySource {
+struct LocalReplaySource {
     source: Box<dyn Source>,
     host: Option<String>,
 }
@@ -354,7 +354,7 @@ struct NativeReplaySource {
 async fn sources_of(
     read_conn: &mut sqlx::PgConnection,
     sequence: &[Stored],
-) -> Result<Vec<NativeReplaySource>> {
+) -> Result<Vec<LocalReplaySource>> {
     if sequence.iter().any(|m| {
         m.binding
             .as_deref()
@@ -400,7 +400,7 @@ async fn sources_of(
                     Error::bad_request(format!("material {}: no source has parser {parser}", m.id))
                 })?,
         };
-        out.push(NativeReplaySource {
+        out.push(LocalReplaySource {
             source: sources::source_for(&binding)
                 .map_err(|e| Error::bad_request(format!("material {}: {e}", m.id)))?,
             host,
@@ -448,7 +448,7 @@ struct Read {
 struct SequenceReader {
     blobs: Blobs,
     sequence: Vec<Stored>,
-    parsers: Vec<NativeReplaySource>,
+    parsers: Vec<LocalReplaySource>,
     in_scope: BTreeSet<Uuid>,
     scope: Scope,
     operation: OperationId,
@@ -525,7 +525,7 @@ impl SequenceReader {
 fn read_sequence_into(
     blobs: &sinex_store::Blobs,
     sequence: &[Stored],
-    parsers: &[NativeReplaySource],
+    parsers: &[LocalReplaySource],
     in_scope: &BTreeSet<Uuid>,
     scope: &Scope,
     operation: OperationId,
@@ -570,8 +570,8 @@ fn read_sequence_into(
         }],
     })?;
     let mut carry = Value::Null;
-    for (position, (m, native)) in sequence.iter().zip(parsers).enumerate() {
-        let source = &native.source;
+    for (position, (m, parser)) in sequence.iter().zip(parsers).enumerate() {
+        let source = &parser.source;
         // A later part read again what the reader had not admitted of this one.
         let admitted = sequence
             .get(position + 1)
@@ -672,7 +672,7 @@ fn read_sequence_into(
                         name: source.spec().name.into(),
                         version: source.spec().parser_version,
                     }),
-                    host: native.host.clone(),
+                    host: parser.host.clone(),
                 },
                 records,
                 archive: Vec::new(),

@@ -1,4 +1,4 @@
-//! Moment marks and saved questions are ordinary authored records.
+//! Moment marks and saved questions are authored records like any other.
 use crate::Timestamp;
 use crate::query::saved::Parameter;
 use schemars::JsonSchema;
@@ -43,7 +43,7 @@ pub struct Saved {
     #[event(class = guarded)]
     pub query: String,
     #[event(class = guarded)]
-    pub template: crate::query::native::Template,
+    pub template: crate::query::template::Template,
     #[event(class = guarded)]
     pub parameters: Vec<Parameter>,
     #[event(class = guarded)]

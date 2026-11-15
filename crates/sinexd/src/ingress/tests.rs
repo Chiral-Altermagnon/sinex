@@ -52,7 +52,7 @@ fn test_source(producer: &str) -> sinex_model::SourceRef {
 fn test_write(
     producer: &str,
     kinds: Vec<sinex_model::KindDeclaration>,
-) -> crate::ingress::authority::WriteGrant {
+) -> crate::ingress::write_access::WriteGrant {
     let mut prefixes = kinds
         .iter()
         .map(|kind| kind.kind.name.split('.').next().unwrap().to_owned())
@@ -60,7 +60,7 @@ fn test_write(
     prefixes.extend([producer.to_owned(), "not".into()]);
     prefixes.sort();
     prefixes.dedup();
-    crate::ingress::authority::WriteGrant {
+    crate::ingress::write_access::WriteGrant {
         family: producer.into(),
         host: Some("test-host".into()),
         source_prefixes: vec![producer.into()],
@@ -385,10 +385,9 @@ impl Harness {
         let hint = loop {
             let message = tokio::time::timeout(Duration::from_secs(20), acks.next())
                 .await
-                .expect("receipt hint")
+                .expect("ack hint")
                 .unwrap();
-            let hint: sinex_protocol::ReceiptHint =
-                serde_json::from_slice(&message.payload).unwrap();
+            let hint: sinex_protocol::AckHint = serde_json::from_slice(&message.payload).unwrap();
             if hint.frame_hash == expected_hash {
                 break hint;
             }
@@ -408,7 +407,7 @@ impl Harness {
         page.acknowledgments
             .into_iter()
             .find(|ack| ack.number == hint.number)
-            .expect("complete owned receipt")
+            .expect("complete recorded ack")
     }
 
     async fn recorded(&self, producer: &str, frames: &[&str]) -> Vec<Acknowledgment> {
@@ -501,7 +500,7 @@ impl Drop for Harness {
     }
 }
 
-fn imported(material: MaterialId, anchor: u64, command: &str) -> ProducerEvent {
+fn imported(material: MaterialId, record_offset: u64, command: &str) -> ProducerEvent {
     ProducerEvent {
         kind: sinex_model::KindRef {
             name: "command.imported".into(),
@@ -513,9 +512,12 @@ fn imported(material: MaterialId, anchor: u64, command: &str) -> ProducerEvent {
             "started_at": "2026-10-18T12:00:00Z",
             "header_elapsed": 0,
             // Distinct per place, so the tests' records stay distinct.
-            "n": anchor
+            "n": record_offset
         }),
-        location: Some(RecordLocation { material, anchor }),
+        location: Some(RecordLocation {
+            material,
+            record_offset,
+        }),
         output_index: 0,
         parents: vec![],
         reading_order: Some(0),
@@ -572,12 +574,12 @@ async fn materials_then_events_are_admitted_and_acknowledged_once(db: devkit::pg
 
 /// A synthetic Claude Code session as Polylogue sends it: the session file as
 /// a material of its real input, then the session, its message and tool call
-/// and the turn, keyed by Polylogue's IDs and anchored at their records. The
+/// and the turn, keyed by Polylogue's IDs and located at their records. The
 /// same reading sent again is a repeat; a newer parser's reading replaces the
 /// message; the session answers Sinex's own query language; and the
 /// materials request lists the file, as Polylogue reads it to rebuild.
 #[devkit::test]
-async fn an_ai_session_from_polylogue_is_ordinary_events(db: devkit::pg::TestDatabase) {
+async fn polylogue_session_reads_like_other_events(db: devkit::pg::TestDatabase) {
     let declarations: Vec<_> = [
         ("session", "session", "started", false),
         ("message", "message", "at", true),
@@ -663,20 +665,26 @@ async fn an_ai_session_from_polylogue_is_ordinary_events(db: devkit::pg::TestDat
     };
     assert_eq!(h.send("polylogue", &frame).await.refusal(), None);
     let second = file.find('\n').unwrap() as u64 + 1;
-    let at = |anchor: u64| Some(RecordLocation { material, anchor });
-    let event =
-        |event_type: &str, payload: serde_json::Value, anchor: u64, order: i64| ProducerEvent {
+    let at = |record_offset: u64| {
+        Some(RecordLocation {
+            material,
+            record_offset,
+        })
+    };
+    let event = |event_type: &str, payload: serde_json::Value, record_offset: u64, order: i64| {
+        ProducerEvent {
             kind: sinex_model::KindRef {
                 name: event_type.into(),
                 version: 2,
             },
             payload,
-            location: at(anchor),
+            location: at(record_offset),
             output_index: 0,
             parents: vec![],
             reading_order: Some(order),
             class: sinex_model::Class::Open,
-        };
+        }
+    };
     let session = json!({
         "session": "claude-code:s1", "origin": "claude-code", "kind": "main", "title": null,
         "cwd": ["/home/op/morrow"], "repo": null, "branch": null, "tool_version": null,
@@ -856,7 +864,7 @@ async fn producers_are_limited_to_their_own_subjects() {
     );
     assert!(!config.contains("dpw") && !config.contains("kpw"));
     let api_subjects = [
-        "$JS.API.CONSUMER.CREATE.SX_CONFIRMED.foreign",
+        "$JS.API.CONSUMER.CREATE.SX_CONFIRMED.other",
         "$JS.API.CONSUMER.DELETE.SX_CONFIRMED.sinex-kitty-scope",
         "$JS.API.CONSUMER.MSG.NEXT.SX_CONFIRMED.sinex-phone",
         "$JS.API.CONSUMER.MSG.NEXT.SX_CONFIRMED.sinex-kitty-old-scope",
@@ -969,9 +977,9 @@ async fn producers_are_limited_to_their_own_subjects() {
         tokio::time::timeout(Duration::from_millis(300), api.next())
             .await
             .is_err(),
-        "foreign/admin/raw-message API requests must not reach the daemon"
+        "other-consumer, admin and raw-message API requests must not reach the daemon"
     );
-    let mut foreign_flow = daemon
+    let mut phone_flow = daemon
         .subscribe("_INBOX.phone.synthetic.flow")
         .await
         .unwrap();
@@ -990,12 +998,12 @@ async fn producers_are_limited_to_their_own_subjects() {
         .unwrap();
     kitty.flush().await.unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), foreign_flow.next())
+        tokio::time::timeout(Duration::from_millis(300), phone_flow.next())
             .await
             .is_err(),
-        "a foreign credential cannot acknowledge another principal's flow"
+        "one credential cannot acknowledge another principal's flow"
     );
-    let mut foreign_inbox = kitty.subscribe("_INBOX.phone.>").await.unwrap();
+    let mut phone_inbox = kitty.subscribe("_INBOX.phone.>").await.unwrap();
     kitty.flush().await.unwrap();
     daemon
         .publish("_INBOX.phone.synthetic", "private response".into())
@@ -1003,23 +1011,23 @@ async fn producers_are_limited_to_their_own_subjects() {
         .unwrap();
     daemon.flush().await.unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), foreign_inbox.next())
+        tokio::time::timeout(Duration::from_millis(300), phone_inbox.next())
             .await
             .map_or(true, |message| message.is_none()),
         "producer must not eavesdrop another identity's RPC reply inbox"
     );
-    let mut foreign_inline = kitty.subscribe("sx.confirmed.>").await.unwrap();
+    let mut raw_confirmed = kitty.subscribe("sx.confirmed.>").await.unwrap();
     kitty.flush().await.unwrap();
     daemon
         .publish(
-            "sx.confirmed.event.open.foreign.kind",
+            "sx.confirmed.event.open.other.kind",
             "private inline payload".into(),
         )
         .await
         .unwrap();
     daemon.flush().await.unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), foreign_inline.next())
+        tokio::time::timeout(Duration::from_millis(300), raw_confirmed.next())
             .await
             .map_or(true, |message| message.is_none()),
         "producer cannot bypass its scoped consumer with a raw stream subscription"
@@ -1045,7 +1053,7 @@ async fn ingress_events_reach_the_confirmed_stream(db: devkit::pg::TestDatabase)
     let h = Harness::start(db).await;
     let (material, frame) = h.material_frame("m1", b"ls\n");
     h.send("kitty", &frame).await;
-    let receipt = h
+    let ack = h
         .send(
             "kitty",
             &Ingress::Events {
@@ -1072,8 +1080,8 @@ async fn ingress_events_reach_the_confirmed_stream(db: devkit::pg::TestDatabase)
     let Confirmed::Event(event) = serde_json::from_slice(&message.payload).unwrap() else {
         panic!("an open event travels complete")
     };
-    assert_eq!(event.commit_seq, receipt.commit_seq().unwrap());
-    assert_eq!(event.id, receipt.admitted()[0]);
+    assert_eq!(event.commit_seq, ack.commit_seq().unwrap());
+    assert_eq!(event.id, ack.admitted()[0]);
     assert_eq!(event.event_type, "command.imported");
     assert_eq!(event.location.unwrap().material, material);
     let _ = &h.nats;
@@ -1137,7 +1145,7 @@ async fn bytes_sent_in_chunks_register_a_material_and_failures_are_recorded(
                 failures: vec![ProducerFailure {
                     location: RecordLocation {
                         material: id,
-                        anchor: 18,
+                        record_offset: 18,
                     },
                     reason: "unreadable".into(),
                 }],
@@ -1355,9 +1363,9 @@ async fn frames_flow_while_a_request_waits(db: devkit::pg::TestDatabase) {
     tokio::pin!(sending);
     let hint = tokio::select! {
         hint = tokio::time::timeout(Duration::from_secs(10), hints.next()) => hint.unwrap().unwrap(),
-        receipt = &mut sending => panic!("full receipt resolved while its read connection was held: {receipt:?}"),
+        ack = &mut sending => panic!("full ack resolved while its read connection was held: {ack:?}"),
     };
-    let hint: sinex_protocol::ReceiptHint = serde_json::from_slice(&hint.payload).unwrap();
+    let hint: sinex_protocol::AckHint = serde_json::from_slice(&hint.payload).unwrap();
     assert_eq!(hint.frame_hash, blake3::hash(b"m1").to_hex().to_string());
     assert!(!request.is_finished());
 
@@ -1690,7 +1698,7 @@ async fn content_failures_use_the_named_material_and_missing_locations_are_malfo
             assert_eq!(
                 h.send("session", &retry).await,
                 ack,
-                "durable malformed-content retry"
+                "a malformed-content retry gets the recorded ack"
             );
         }
         assert_eq!(

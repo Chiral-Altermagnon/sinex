@@ -23,7 +23,7 @@ fn source(class: Class) -> Event {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -96,7 +96,7 @@ async fn insert(conn: &mut AdmissionContext, event: Event) {
 
 async fn page(conn: &mut PgConnection, text: &str, size: u64, cursor: Option<String>) -> Answer {
     let context = sinex_model::query::Context::utc("2026-09-15T00:00:00Z".parse().unwrap());
-    let operation = sinex_model::query::native::parse(text, &context).unwrap();
+    let operation = sinex_model::query::template::parse(text, &context).unwrap();
     crate::query::run_operation(
         conn,
         text,
@@ -190,7 +190,7 @@ async fn no_depth_caps_complete_deep_branches_through_continuation(db: devkit::p
 }
 
 #[devkit::test]
-async fn retained_edge_cycles_terminate_with_shortest_depths(db: devkit::pg::TestDatabase) {
+async fn stored_edge_cycles_terminate_with_shortest_depths(db: devkit::pg::TestDatabase) {
     let mut conn = AdmissionContext::connect(&db.url(None)).await.unwrap();
     let mut ids = vec![];
     for _ in 0..4 {
@@ -198,7 +198,7 @@ async fn retained_edge_cycles_terminate_with_shortest_depths(db: devkit::pg::Tes
         ids.push(event.id.0);
         insert(&mut conn, event).await;
     }
-    // Retained historical edges can be malformed. Walking them must terminate
+    // Stored historical edges can be malformed. Walking them must terminate
     // without inventing a depth limit or repeating a vertex for every path.
     for (parent, child) in [
         (ids[0], ids[1]),
@@ -297,7 +297,7 @@ async fn traces_name_masked_archived_missing_and_tombstoned_links(db: devkit::pg
     assert_eq!(archived[0]["state"], "archived");
     assert_eq!(archived[1]["state"], "archived");
     assert_eq!(archived[2]["state"], "live");
-    // The retained skeleton and edges outlive tombstoned readings.
+    // The kept skeleton and edges outlive tombstoned readings.
     let tombstoned =
         crate::lifecycle::move_events(&mut conn, Act::Tombstone, vec![child_id], &NoDerivations)
             .await;

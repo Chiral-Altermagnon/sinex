@@ -1,4 +1,4 @@
-//! The rows and exact provenance of one recall page, for historical previews.
+//! The rows and full provenance of one recall page, for historical previews.
 use super::*;
 use serde_json::json;
 use sinex_model::event_types::analysis::QuerySelection;
@@ -23,7 +23,7 @@ pub struct SelectedAnswer {
 pub(super) async fn capture(
     conn: &mut PgConnection,
     text: &str,
-    template: &sinex_model::query::native::Template,
+    template: &sinex_model::query::template::Template,
     query: &Query,
     ctx: &Context,
     seq: i64,
@@ -59,7 +59,7 @@ pub(super) async fn capture(
         }
         rows.push(input["row"].clone());
     }
-    parents.extend(selection.anchor_ids());
+    parents.extend(selection.around_ids());
     let ids: Vec<_> = parents.into_iter().collect();
     let classes: Vec<String> = sqlx::query_scalar("SELECT class::text FROM core.visible_events WHERE id = ANY($1) AND commit_seq <= $2 AND NOT audit.is_archived_at(id, $2)")
         .bind(&ids).bind(seq).fetch_all(&mut *conn).await?;
@@ -85,10 +85,10 @@ pub(super) async fn capture(
         .collect();
     grants.sort();
     grants.dedup();
-    let mut retained = selection.retained(&query.source)?;
-    retained["_query"] = json!(format!("{query:?}"));
-    retained["_template"] = template.identity()?;
-    retained["_fingerprint"] = json!(
+    let mut stored_selection = selection.to_stored(&query.source)?;
+    stored_selection["_query"] = json!(format!("{query:?}"));
+    stored_selection["_template"] = template.identity()?;
+    stored_selection["_fingerprint"] = json!(
         blake3::hash(
             serde_json::to_vec(&json!([rows, account]))
                 .map_err(|error| Error::Invalid(error.to_string()))?
@@ -107,7 +107,7 @@ pub(super) async fn capture(
         zone: ctx.zone_name(),
         day_start: ctx.day_start.to_string(),
         grants,
-        selected: retained,
+        selected: stored_selection,
         declarations: serde_json::to_value(
             ctx.catalog
                 .as_ref()
@@ -120,7 +120,7 @@ pub(super) async fn capture(
     Ok((selection, ids.into_iter().map(EventId).collect(), class))
 }
 
-/// Historical previews use the same selected rows and exact provenance without
+/// Historical previews use the same selected rows and full provenance without
 /// admitting a new live output over inputs that may already be archived.
 pub async fn selected_page(
     conn: &mut PgConnection,
@@ -131,7 +131,7 @@ pub async fn selected_page(
     let template = if sinex_model::query::saved::reference_name(text).is_some() {
         None
     } else {
-        Some(sinex_model::query::native::parse(text, ctx)?)
+        Some(sinex_model::query::template::parse(text, ctx)?)
     };
     let selected = run_inner(conn, text, None, ctx, page, true, false, template.as_ref()).await?;
     let signature = selected

@@ -6,7 +6,7 @@ use sinex_source_core::Settings;
 use sinex_sources::sources::google_takeout::{self, fit, tasks};
 use std::io::Write;
 
-mod memory_cut;
+mod saved_memory;
 
 fn archive(path: &std::path::Path) -> usize {
     let fit = json!({"Data Points": (0..40).map(|i| json!({"dataTypeName":"synthetic.steps", "startTimeNanos":i+1,"endTimeNanos":i+2,"fitValue":[{"intVal":i}]})).collect::<Vec<_>>()});
@@ -86,7 +86,7 @@ fn readers(path: &std::path::Path) -> Vec<BindingReader> {
         .map(|spec| {
             let binding = Binding::of(spec, path, settings.clone());
             let mut b = BindingReader::new(&google_takeout::FORMAT, binding).unwrap();
-            // Force several ordinary parts without changing the production limits.
+            // Force several parts without changing the production limits.
             b.reading = Reading::Shared(Box::new(takeout_driver(&b.binding, 400)));
             b
         })
@@ -102,7 +102,7 @@ type EventFields = (
 );
 
 async fn events(conn: &mut PgConnection) -> Vec<EventFields> {
-    sqlx::query_as("SELECT source, equivalence_key, payload, material_id, anchor FROM core.events WHERE event_type IN ('health.record', 'task.revised') ORDER BY source,equivalence_key,material_id,anchor")
+    sqlx::query_as("SELECT source, equivalence_key, payload, material_id, record_offset FROM core.events WHERE event_type IN ('health.record', 'task.revised') ORDER BY source,equivalence_key,material_id,record_offset")
         .fetch_all(conn).await.unwrap()
 }
 
@@ -391,7 +391,7 @@ async fn sealed_archive_restart_replay_and_class_changes_preserve_exact_material
             b.source = Arc::new(SmallBatches(b.source.clone()));
             bindings
         };
-        // The second batch fails through real admission, leaving a durable partial part.
+        // The second batch fails through real admission, leaving a committed partial part.
         sqlx::raw_sql("CREATE FUNCTION synthetic_stop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type <> 'source.coverage' AND (SELECT count(*) FROM core.events WHERE event_type <> 'source.coverage') >= 2 THEN RAISE EXCEPTION 'synthetic admission stop'; END IF; RETURN NEW; END $$; CREATE TRIGGER synthetic_stop BEFORE INSERT ON core.events FOR EACH ROW EXECUTE FUNCTION synthetic_stop();").execute(&mut ctx.read_conn).await.unwrap();
         let mut bindings = make_bound();
         let name = bindings[0].binding.name.clone();
@@ -682,7 +682,7 @@ async fn sealed_bindings_never_share_data_keys_or_original_blob_names(
 }
 
 async fn live_events(conn: &mut PgConnection) -> Vec<EventFields> {
-    sqlx::query_as("SELECT e.source,e.equivalence_key,e.payload,e.material_id,e.anchor FROM core.events e WHERE e.event_type <> 'source.coverage' AND e.id IN (SELECT event_id FROM core.live_equivalence UNION SELECT event_id FROM core.live_locations) ORDER BY source,equivalence_key,material_id,anchor").fetch_all(conn).await.unwrap()
+    sqlx::query_as("SELECT e.source,e.equivalence_key,e.payload,e.material_id,e.record_offset FROM core.events e WHERE e.event_type <> 'source.coverage' AND e.id IN (SELECT event_id FROM core.live_equivalence UNION SELECT event_id FROM core.live_locations) ORDER BY source,equivalence_key,material_id,record_offset").fetch_all(conn).await.unwrap()
 }
 
 mod directory;

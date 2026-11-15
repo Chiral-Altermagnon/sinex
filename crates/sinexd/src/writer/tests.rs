@@ -20,7 +20,7 @@ fn batch(tag: &str) -> Batch {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -352,16 +352,19 @@ async fn source_content_refusals_keep_material_failures_and_advance_the_cursor(
         carry: serde_json::Value::Null,
         memory: None,
     };
-    let source = |command: &str, anchor: u64, offset: usize| {
+    let source = |command: &str, record_offset: u64, offset: usize| {
         let mut offered = batch(command);
         let mut progress = progress.clone();
-        if anchor != 0 {
+        if record_offset != 0 {
             progress.material = None;
             progress.revision = RevisionChange::Same;
         }
         progress.cursor = serde_json::json!({"offset": offset});
         offered.kind = BatchKind::Source(Box::new(progress));
-        let location = RecordLocation { material, anchor };
+        let location = RecordLocation {
+            material,
+            record_offset,
+        };
         if let RecordOutcome::Events {
             location: record_location,
             events,
@@ -415,7 +418,7 @@ async fn source_content_refusals_keep_material_failures_and_advance_the_cursor(
         .unwrap();
     assert_eq!(outcome.admitted, 0);
     assert_eq!(outcome.failures, 1);
-    let failures: i64 = sqlx::query_scalar("SELECT count(*) FROM raw.failures WHERE material_id=$1 AND anchor=0 AND reason LIKE 'content refused:%'").bind(material.0).fetch_one(&mut reader).await.unwrap();
+    let failures: i64 = sqlx::query_scalar("SELECT count(*) FROM raw.failures WHERE material_id=$1 AND record_offset=0 AND reason LIKE 'content refused:%'").bind(material.0).fetch_one(&mut reader).await.unwrap();
     assert_eq!(failures, 1);
     let cursor: Value =
         sqlx::query_scalar("SELECT cursor FROM raw.positions WHERE binding='synthetic-refusal'")
@@ -433,12 +436,13 @@ async fn source_content_refusals_keep_material_failures_and_advance_the_cursor(
         .await
         .unwrap();
     assert_eq!(outcome.failures, 1);
-    let reason: String =
-        sqlx::query_scalar("SELECT reason FROM raw.failures WHERE material_id=$1 AND anchor=8")
-            .bind(material.0)
-            .fetch_one(&mut reader)
-            .await
-            .unwrap();
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason FROM raw.failures WHERE material_id=$1 AND record_offset=8",
+    )
+    .bind(material.0)
+    .fetch_one(&mut reader)
+    .await
+    .unwrap();
     assert!(reason.contains("database refused invalid data"), "{reason}");
     assert!(!reason.contains("private"));
     assert!(blobs.contains(&blob).unwrap());
@@ -628,7 +632,7 @@ async fn reconnect_reclaims_and_reloads_privacy(db: devkit::pg::TestDatabase) {
         .unwrap();
     assert_eq!(
         class, "guarded",
-        "reconnected writer loads the current source floor"
+        "reconnected writer loads the current minimum class of the source"
     );
     sinex_store::query::set_grants(&mut changes, "guarded")
         .await
@@ -654,7 +658,7 @@ async fn backup_release_dirties_held_punches_for_the_next_group_without_reopen(
     let root = tempfile::tempdir().unwrap();
     let blobs = Blobs::open(root.path()).unwrap();
     blobs.load(&mut conn).await.unwrap();
-    let bytes = b"bytes protected by the two actual writer holds";
+    let bytes = b"bytes protected by the two writer holds";
     let name = blobs.put(bytes).unwrap();
     sqlx::query("INSERT INTO core.blobs(hash,size,status) VALUES($1,$2,'present')")
         .bind(&name)
@@ -683,7 +687,7 @@ async fn backup_release_dirties_held_punches_for_the_next_group_without_reopen(
         .execute(&mut conn)
         .await
         .unwrap();
-    // Mirror the durable marker committed by a real tombstone.
+    // Mirror the marker a real tombstone commits.
     sinex_store::blobs::commit_pending_extents(&mut conn, &blobs)
         .await
         .unwrap();

@@ -31,10 +31,10 @@ async fn shutdown_summary_keeps_unjoined_completions_and_actual_cancellations() 
     assert_eq!(summary.cancelled, 1);
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.panicked, 0);
-    let retained = serde_json::to_value(summary).unwrap();
-    assert_eq!(retained["tasks"][0]["name"], "writer");
-    assert_eq!(retained["tasks"][1]["outcome"], "cancelled");
-    assert!(retained["tasks"][1]["name"].is_null());
+    let reported = serde_json::to_value(summary).unwrap();
+    assert_eq!(reported["tasks"][0]["name"], "writer");
+    assert_eq!(reported["tasks"][1]["outcome"], "cancelled");
+    assert!(reported["tasks"][1]["name"].is_null());
 }
 
 #[devkit::test]
@@ -86,7 +86,7 @@ fn shutdown_batch(tag: &str) -> sinex_model::Batch {
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -99,8 +99,8 @@ fn shutdown_batch(tag: &str) -> sinex_model::Batch {
         run: RunId::new(),
         kind: BatchKind::Ingress(Box::new(IngressFrame {
             content_hash: Some(blake3::hash(tag.as_bytes()).to_hex().to_string()),
-            receipt_number: None,
-            native_source: None,
+            ack_number: None,
+            built_in_source: None,
             source_fingerprint: None,
             host: None,
             family: None,
@@ -154,7 +154,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
     let acknowledged = tx.admit(&committed, &NoDerivations).await.unwrap();
     tx.commit().await.unwrap();
     connection.close().await.unwrap();
-    let receipt:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(f) FROM core.ingress_frames f WHERE producer='synthetic-shutdown' AND frame='acknowledged'")
+    let recorded:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(f) FROM core.ingress_frames f WHERE producer='synthetic-shutdown' AND frame='acknowledged'")
         .fetch_one(&mut observer).await.unwrap();
     for detects_disconnect in [false, true] {
         let mut blocker = connect(&url, "sinex.test").await.unwrap();
@@ -215,7 +215,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
             assert!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')")
-                .bind(pid).fetch_one(&mut observer).await.unwrap(),"old disconnect left the native writer alive");
+                .bind(pid).fetch_one(&mut observer).await.unwrap(),"old disconnect left the writer backend alive");
             assert!(
                 !sinex_store::writer_lock::try_claim(&mut observer)
                     .await
@@ -249,7 +249,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
             }
         })
         .await
-        .expect("native writer backend exited");
+        .expect("writer backend exited");
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM public.shutdown_probe")
                 .fetch_one(&mut observer)
@@ -260,7 +260,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
         let after:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(f) FROM core.ingress_frames f WHERE producer='synthetic-shutdown' AND frame='acknowledged'")
             .fetch_one(&mut observer).await.unwrap();
         assert_eq!(
-            after, receipt,
+            after, recorded,
             "prior committed acknowledgment is unchanged"
         );
         let frame = match &pending.kind {
@@ -268,7 +268,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
             _ => unreachable!(),
         };
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM core.ingress_frames WHERE producer='synthetic-shutdown' AND frame=$1")
-            .bind(frame).fetch_one(&mut observer).await.unwrap(),0,"unfinished frame and receipt rolled back");
+            .bind(frame).fetch_one(&mut observer).await.unwrap(),0,"unfinished frame and its acknowledgment rolled back");
         sqlx::query("SELECT pg_advisory_unlock(927161)")
             .execute(&mut blocker)
             .await
@@ -290,7 +290,7 @@ async fn interrupted_writer_rolls_back_before_shutdown_and_exact_frame_retry(
 }
 
 #[devkit::test]
-async fn shutdown_cannot_succeed_when_native_writer_cleanup_fails(db: devkit::pg::TestDatabase) {
+async fn shutdown_fails_when_writer_backend_cleanup_fails(db: devkit::pg::TestDatabase) {
     let url = db.url(None);
     let dir = tempfile::tempdir().unwrap();
     let blobs = Blobs::open(dir.path()).unwrap();
@@ -321,7 +321,7 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
     let url = db.url(None);
     let root = tempfile::tempdir().unwrap();
     let blobs = Blobs::open(&root.path().join("store")).unwrap();
-    let original = b"synthetic retained source record\n";
+    let original = b"synthetic stored source record\n";
     let blob = blobs.put(original).unwrap();
     let mut observer = connect(&url, "sinex.test").await.unwrap();
     sqlx::raw_sql(
@@ -577,7 +577,7 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
     assert_eq!(
         blobs.read(&blob).unwrap(),
         original,
-        "pending native raw bytes remain available"
+        "pending original bytes remain available"
     );
     let mut fresh = writer::claim(connect(&url, "sinex.test").await.unwrap())
         .await
@@ -635,7 +635,7 @@ async fn source_copy_cancellation_keeps_pending_frame_and_progress_for_retry(
     let sinex_model::RecordOutcome::Events { events, .. } = &mut pending.records[0] else {
         unreachable!()
     };
-    // First COPY row reaches a native lock; the escaped second row fills the
+    // First COPY row reaches a PostgreSQL lock; the escaped second row fills the
     // socket so task cancellation exercises the streaming encoder itself.
     let large = {
         let mut payload: sinex_model::event_types::CommandImported =
@@ -646,7 +646,7 @@ async fn source_copy_cancellation_keeps_pending_frame_and_progress_for_retry(
             .repeat(2 << 20);
         let mut origin = events[0].origin.clone();
         if let sinex_model::Origin::Record { location, .. } = &mut origin {
-            location.anchor = 1;
+            location.record_offset = 1;
         }
         sinex_model::Event::build(
             &payload,

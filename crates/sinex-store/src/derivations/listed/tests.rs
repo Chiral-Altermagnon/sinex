@@ -8,11 +8,11 @@ fn document(text: &str) -> Event {
             label: None,
             text: text.into(),
         },
-        "fixture.exact",
+        "fixture.listed",
         Origin::Record {
             location: RecordLocation {
                 material: MaterialId::new(),
-                anchor: 0,
+                record_offset: 0,
             },
             output_index: 0,
         },
@@ -23,7 +23,7 @@ fn document(text: &str) -> Event {
     .unwrap()
 }
 #[devkit::test]
-async fn exact_targets_are_paged_live_transformed_and_keep_unknown_times(
+async fn listed_targets_are_paged_live_transformed_and_keep_unknown_times(
     db: devkit::pg::TestDatabase,
 ) {
     let mut conn = AdmissionContext::connect(&db.url(None)).await.unwrap();
@@ -48,8 +48,8 @@ async fn exact_targets_are_paged_live_transformed_and_keep_unknown_times(
     crate::privacy::add_rule(
         &mut conn,
         &crate::privacy::NewRule {
-            name: "configured exact field".into(),
-            source: "fixture.exact".into(),
+            name: "configured listed field".into(),
+            source: "fixture.listed".into(),
             event_type: Some("operator_log.entry".into()),
             field: Some("/text".into()),
             matcher: "pattern".into(),
@@ -72,7 +72,7 @@ async fn exact_targets_are_paged_live_transformed_and_keep_unknown_times(
     )
     .await;
     let mut reader =
-        ExactInputs::new(vec![ids[0], ids[1], ids[1], ids[2], EventId::new()], 1, 1).unwrap();
+        ListedInputs::new(vec![ids[0], ids[1], ids[1], ids[2], EventId::new()], 1, 1).unwrap();
     let first = reader.next(&mut conn).await.unwrap().unwrap();
     let second = reader.next(&mut conn).await.unwrap().unwrap();
     assert!(reader.next(&mut conn).await.unwrap().is_none());
@@ -90,7 +90,7 @@ async fn exact_targets_are_paged_live_transformed_and_keep_unknown_times(
 }
 
 #[devkit::test]
-async fn exact_targets_never_expand_to_unrequested_retained_position_siblings(
+async fn listed_targets_never_expand_to_unrequested_position_siblings(
     db: devkit::pg::TestDatabase,
 ) {
     let mut conn = AdmissionContext::connect(&db.url(None)).await.unwrap();
@@ -101,7 +101,7 @@ async fn exact_targets_never_expand_to_unrequested_retained_position_siblings(
     ];
     let expected: std::collections::BTreeSet<_> = [events[0].id, events[2].id].into();
     // Normal admission assigns distinct positions. Insert an explicitly
-    // synthetic retained tie without changing any immutable event.
+    // synthetic stored tie without changing any immutable event.
     let mut tx = conn.begin().await.unwrap();
     for event in &events {
         let Origin::Record {
@@ -111,15 +111,15 @@ async fn exact_targets_never_expand_to_unrequested_retained_position_siblings(
         else {
             panic!("record fixture")
         };
-        sqlx::query("INSERT INTO core.events(id,event_type,source,run_id,material_id,anchor,output_index,ts_quality,commit_seq,payload,reading_order,record_hash,kind_version) VALUES($1,$2,$3,$4,$5,$6,$7,'unknown',3,$8,1,$9,$10)")
-            .bind(event.id.0).bind(&event.event_type).bind(&event.source).bind(RunId::new().0).bind(location.material.0).bind(location.anchor as i64).bind(*output_index as i64).bind(&event.payload).bind(event.record_hash.as_slice()).bind(event.kind_version as i64).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO core.events(id,event_type,source,run_id,material_id,record_offset,output_index,ts_quality,commit_seq,payload,reading_order,record_hash,kind_version) VALUES($1,$2,$3,$4,$5,$6,$7,'unknown',3,$8,1,$9,$10)")
+            .bind(event.id.0).bind(&event.event_type).bind(&event.source).bind(RunId::new().0).bind(location.material.0).bind(location.record_offset as i64).bind(*output_index as i64).bind(&event.payload).bind(event.record_hash.as_slice()).bind(event.kind_version as i64).execute(&mut *tx).await.unwrap();
     }
     sqlx::query("UPDATE core.counters SET value=3 WHERE name='commit_seq'")
         .execute(&mut *tx)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    let mut reader = ExactInputs::new(expected.iter().copied().collect(), 1, 1).unwrap();
+    let mut reader = ListedInputs::new(expected.iter().copied().collect(), 1, 1).unwrap();
     let mut seen = std::collections::BTreeSet::new();
     let mut pages = 0;
     while let Some(page) = reader.next(&mut conn).await.unwrap() {

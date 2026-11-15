@@ -1,4 +1,4 @@
-//! A query's resolved selection, retained independently of presentation pages.
+//! A query's resolved selection, stored independently of presentation pages.
 use crate::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,8 +8,8 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct QuerySelection {
     pub query: String,
-    /// Executable definition; authored query text remains unchanged evidence.
-    pub template: crate::query::native::Template,
+    /// Executable definition; the authored query text is kept unchanged.
+    pub template: crate::query::template::Template,
     /// The saved definitions the question used, as they were when it was asked.
     pub definitions: std::collections::BTreeMap<String, crate::query::saved::SavedQuery>,
     pub now: Timestamp,
@@ -20,6 +20,6 @@ pub struct QuerySelection {
     pub grants: Vec<String>,
     /// The resolved window, or stable shell-session/mark record coordinates.
     pub selected: Value,
-    /// Exact declaration references and hashes used to bind the question.
+    /// The declaration references and hashes used to bind the question.
     pub declarations: Value,
 }
