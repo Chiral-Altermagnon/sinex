@@ -41,7 +41,7 @@ fn contents(computed: &Computed) -> Vec<IntervalContents> {
 async fn compare_full(conn: &mut PgConnection, state: &str) -> Computed {
     let env = environment();
     let key = key(state, &env);
-    let query = Keyed::inputs(&StateIntervals, &key, &env).unwrap();
+    let query = AnyKeyed::inputs(&StateIntervals, &key, &env).unwrap();
     let bounded = sinex_store::derivations::read_window(conn, &to_window(&query, env.now))
         .await
         .unwrap();
@@ -55,13 +55,13 @@ async fn compare_full(conn: &mut PgConnection, state: &str) -> Computed {
     let full = sinex_store::derivations::read_window(conn, &full)
         .await
         .unwrap();
-    let expected = Keyed::compute(
+    let expected = AnyKeyed::compute(
         &StateIntervals,
         &key,
         &full.into_iter().map(|r| r.event).collect::<Vec<_>>(),
         &env,
     );
-    let actual = Keyed::compute(
+    let actual = AnyKeyed::compute(
         &StateIntervals,
         &key,
         &bounded.into_iter().map(|r| r.event).collect::<Vec<_>>(),
@@ -419,21 +419,22 @@ async fn scalar_bounds_keep_older_keys_unknown_times_and_afk(db: devkit::pg::Tes
     assert!(has_parent(complex, complex_refresh) && has_parent(complex, complex_close));
 }
 
-/// Version 3's fold, with the old defect of omitting a key's prior observation.
-/// It leaves a closed historical output that waiting-key processing cannot fix.
+/// A fold that omits a key's prior observation at the current derivation version.
+/// Its closed historical output is left for an explicit key recomputation.
 struct MissingPrior;
 impl Keyed for MissingPrior {
+    type Key = <StateIntervals as Keyed>::Key;
     const NAME: &'static str = "state.intervals";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = <StateIntervals as Keyed>::VERSION;
     const USES_TIME_SETTINGS: bool = true;
     const INPUTS: &'static [&'static str] = <StateIntervals as Keyed>::INPUTS;
     const OUTPUTS: &'static [&'static str] = <StateIntervals as Keyed>::OUTPUTS;
-    fn keys_for(&self, input: &KeyView<'_>, env: &Env) -> Vec<Value> {
+    fn keys_for(&self, input: &KeyView<'_>, env: &Env) -> Vec<Self::Key> {
         Keyed::keys_for(&StateIntervals, input, env)
     }
-    fn inputs(&self, selected: &Value, env: &Env) -> Option<InputQuery> {
+    fn inputs(&self, selected: &Self::Key, env: &Env) -> Option<InputQuery> {
         let mut query = Keyed::inputs(&StateIntervals, selected, env)?;
-        if *selected == key("desktop.focus", env) {
+        if serde_json::to_value(selected).unwrap() == key("desktop.focus", env) {
             query.range = None;
             query.window = Some((
                 env.time_settings
@@ -444,18 +445,16 @@ impl Keyed for MissingPrior {
         }
         Some(query)
     }
-    fn compute(&self, selected: &Value, inputs: &[Event], env: &Env) -> Computed {
+    fn compute(&self, selected: &Self::Key, inputs: &[Event], env: &Env) -> Computed {
         Keyed::compute(&StateIntervals, selected, inputs, env)
     }
-    fn key_state(&self, selected: &Value, env: &Env) -> KeyState {
+    fn key_state(&self, selected: &Self::Key, env: &Env) -> KeyState {
         Keyed::key_state(&StateIntervals, selected, env)
     }
 }
 
 #[devkit::test]
-async fn explicit_key_recompute_preserves_version_three_history_and_other_keys(
-    db: devkit::pg::TestDatabase,
-) {
+async fn explicit_key_recompute_preserves_history_and_other_keys(db: devkit::pg::TestDatabase) {
     use sinex_store::admission::DerivedScope;
     let w = World::with_keys(db, vec![Box::new(MissingPrior)]).await;
     let prior = observation("history", "same", -7 * 3600, 1, "fixture.history");
@@ -537,6 +536,6 @@ async fn explicit_key_recompute_preserves_version_three_history_and_other_keys(
                 .unwrap();
         assert!(live);
     }
-    assert_eq!(<StateIntervals as Keyed>::VERSION, 3);
+    assert_eq!(<StateIntervals as Keyed>::VERSION, 4);
     corrected.end_runs().await.unwrap();
 }

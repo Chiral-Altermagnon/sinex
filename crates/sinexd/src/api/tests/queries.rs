@@ -174,6 +174,7 @@ async fn time_citations_follow_replaced_spans_and_recall_includes_states_already
             host: "synthetic".into(),
             started_at: start,
             ended_at: end,
+            end_is_lower_bound: false,
             day: "2026-09-14".into(),
             commands: 1,
             failed: 0,
@@ -328,9 +329,9 @@ async fn ambiguous_saved_names_do_not_block_other_saved_questions(db: devkit::pg
         &sinex_model::event_types::query::Saved {
             name: "clash".into(),
             query: "events | count".into(),
-            template: sinex_model::query::template::parse(
+            template: sinex_query::template::parse(
                 "events | count",
-                &sinex_model::query::Context::utc(jiff::Timestamp::UNIX_EPOCH),
+                &sinex_query::Context::utc(jiff::Timestamp::UNIX_EPOCH),
             )
             .unwrap(),
             parameters: vec![],

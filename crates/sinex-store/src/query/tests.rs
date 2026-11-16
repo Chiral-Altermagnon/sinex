@@ -5,11 +5,11 @@ use crate::NoDerivations;
 use crate::read_models::tests::catch_up_search_text;
 use serde_json::json;
 use sinex_model::event_types::{CommandExecuted, CommandFused};
-use sinex_model::query::{Context, bind};
 use sinex_model::{
     Batch, BatchKind, Class, Event, EventId, MaterialId, OperationId, Origin, ReadingOrder,
     RecordLocation, RecordOutcome, RunId, Timestamp,
 };
+use sinex_query::{Context, bind};
 use sqlx::Connection;
 use uuid::Uuid;
 
@@ -139,8 +139,8 @@ async fn ask(conn: &mut PgConnection, text: &str) -> Answer {
 
 async fn ask_page(conn: &mut PgConnection, text: &str, page: Page) -> Answer {
     let ctx = ctx();
-    let result = if sinex_model::query::template::is_command(text) {
-        let operation = sinex_model::query::template::parse(text, &ctx).unwrap();
+    let result = if sinex_query::template::is_command(text) {
+        let operation = sinex_query::template::parse(text, &ctx).unwrap();
         run_operation(conn, text, &operation, &ctx, &page).await
     } else {
         run(conn, text, None, &ctx, &page).await
@@ -558,7 +558,7 @@ async fn walks_follow_provenance(db: devkit::pg::TestDatabase) {
     assert_eq!(column(&a, "id"), [json!(observed.to_string())]);
     let a = ask(&mut conn, &format!("descendants {observed}")).await;
     assert_eq!(column(&a, "id"), [json!(fused.to_string())]);
-    let shown = show(&mut conn, &sinex_model::query::Reference::Event(fused))
+    let shown = show(&mut conn, &sinex_query::Reference::Event(fused))
         .await
         .unwrap();
     assert_eq!(shown["state"], json!("live"));
@@ -946,3 +946,37 @@ mod follow;
 mod fields;
 
 mod temporal_selectors;
+
+#[devkit::test]
+async fn sql_hour_matches_the_daemon_zone_across_both_transitions(db: devkit::pg::TestDatabase) {
+    let mut conn = crate::AdmissionContext::connect(&db.url(None))
+        .await
+        .unwrap();
+    let ctx = Context::new(
+        "2026-11-01T00:00:00Z".parse().unwrap(),
+        jiff::tz::TimeZone::get("Europe/Warsaw").unwrap(),
+        jiff::civil::Time::constant(4, 0, 0, 0),
+    );
+    let times = [
+        "2026-03-29T00:59:59Z",
+        "2026-03-29T01:00:00Z",
+        "2026-03-29T01:30:00Z",
+        "2026-10-25T00:30:00Z",
+        "2026-10-25T00:59:59Z",
+        "2026-10-25T01:00:00Z",
+        "2026-10-25T01:30:00Z",
+        "2026-10-25T02:00:00Z",
+        "1969-12-31T20:00:00Z",
+    ];
+    let mut expected = Vec::new();
+    for (i, time) in times.iter().enumerate() {
+        let name = format!("sql-hour-fixture-{i:02}");
+        calendar::point(&mut conn, &name, time).await;
+        let instant = time.parse::<jiff::Timestamp>().unwrap();
+        expected.push(json!({"producer":name,"hour":instant.to_zoned(ctx.zone.clone()).hour()}));
+    }
+    let answer = run(&mut conn,
+        "runs where producer ^ sql-hour-fixture | sort by producer | fields producer, hour(started)",
+        None, &ctx, &Page::default()).await.unwrap();
+    assert_eq!(answer.rows, expected);
+}

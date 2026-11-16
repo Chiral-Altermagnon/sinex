@@ -58,7 +58,14 @@ fn facts(host: &str, rows: &[(i64, &str, Option<i64>)], class: Class) -> Vec<Eve
             .expect("fixture day setting"),
     );
     let sessions = ShellSessions
-        .compute(&json!({"host":host,"day":"2026-09-14"}), &fused, &env)
+        .compute(
+            &sinex_derivations::keys::HostDayKey {
+                host: host.into(),
+                day: "2026-09-14".parse().unwrap(),
+            },
+            &fused,
+            &env,
+        )
         .outputs;
     events.extend(fused);
     events.extend(sessions);
@@ -535,9 +542,9 @@ async fn recall_context_excludes_saved_definitions_but_inherits_selected_activit
         let definition = sinex_model::event_types::query::Saved {
             name: format!("synthetic-definition-{index}"),
             query: "events | fields id".into(),
-            template: sinex_model::query::template::parse(
+            template: sinex_query::template::parse(
                 "events | fields id",
-                &sinex_model::query::Context::utc(jiff::Timestamp::UNIX_EPOCH),
+                &sinex_query::Context::utc(jiff::Timestamp::UNIX_EPOCH),
             )
             .unwrap(),
             parameters: vec![],

@@ -1,6 +1,7 @@
 use super::*;
+use crate::AnyKeyed as Keyed;
+use crate::Env;
 use crate::activity::SECOND;
-use crate::{Env, Keyed};
 use serde_json::{Value, json};
 use sinex_model::event_types::portfolio::{InputWorkload, RhythmDeviation};
 use sinex_model::{Class, Event, MaterialId, Origin, ReadingOrder, RecordLocation, Timestamp};
@@ -201,7 +202,7 @@ fn mark_links_wait_for_record_keys_or_host_sessions() {
     command.source = "terminal.atuin-history".into();
     let session = record(
         "shell.session",
-        json!({"host":"box","started_at":at(0),"ended_at":at(10),"day":"2023-11-14","commands":1,"failed":0,"cwds":["/example"]}),
+        json!({"host":"box","started_at":at(0),"ended_at":at(10),"end_is_lower_bound":false,"day":"2023-11-14","commands":1,"failed":0,"cwds":["/example"]}),
         0,
     );
     let mark = record(

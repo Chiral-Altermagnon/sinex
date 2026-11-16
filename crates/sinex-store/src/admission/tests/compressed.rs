@@ -3,7 +3,7 @@
 //! tables, so no statement decompresses a chunk. Only a tombstone deletes rows.
 use super::*;
 use crate::query::{Page, run};
-use sinex_model::query::{Context, bind};
+use sinex_query::{Context, bind};
 
 /// `keyed`'s event with an ID made `days` ago, so it lands in an old chunk.
 fn old(key: u8, days: u64) -> Event {
@@ -89,6 +89,7 @@ async fn operations_on_compressed_history_decompress_nothing(db: devkit::pg::Tes
             host: None,
         },
         archive: vec![ArchiveRequest::Replay {
+            failed_records: vec![],
             scope: sinex_model::ReplayScope {
                 materials: vec![material_of(&history[7])],
                 ..Default::default()

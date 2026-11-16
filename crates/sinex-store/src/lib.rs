@@ -16,6 +16,7 @@ pub mod copy_text;
 pub mod coverage;
 pub mod derivations;
 pub mod diagnostics;
+pub mod event_row;
 pub mod failure;
 pub mod library_shown;
 pub mod lifecycle;
@@ -77,7 +78,7 @@ pub fn payload_bytes(payload: &serde_json::Value) -> i64 {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Query(#[from] sinex_model::query::QueryError),
+    Query(#[from] sinex_query::QueryError),
     #[error(transparent)]
     Schema(#[from] sinex_schema::Error),
     #[error(transparent)]

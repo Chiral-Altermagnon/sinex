@@ -23,7 +23,7 @@ pub struct SelectedAnswer {
 pub(super) async fn capture(
     conn: &mut PgConnection,
     text: &str,
-    template: &sinex_model::query::template::Template,
+    template: &sinex_model::query_definition::Template,
     query: &Query,
     ctx: &Context,
     seq: i64,
@@ -87,7 +87,7 @@ pub(super) async fn capture(
     grants.dedup();
     let mut stored_selection = selection.to_stored(&query.source)?;
     stored_selection["_query"] = json!(format!("{query:?}"));
-    stored_selection["_template"] = template.identity()?;
+    stored_selection["_template"] = sinex_query::template::identity(template)?;
     stored_selection["_fingerprint"] = json!(
         blake3::hash(
             serde_json::to_vec(&json!([rows, account]))
@@ -128,10 +128,10 @@ pub async fn selected_page(
     ctx: &Context,
     page: &Page,
 ) -> Result<SelectedAnswer> {
-    let template = if sinex_model::query::saved::reference_name(text).is_some() {
+    let template = if sinex_query::saved::reference_name(text).is_some() {
         None
     } else {
-        Some(sinex_model::query::template::parse(text, ctx)?)
+        Some(sinex_query::template::parse(text, ctx)?)
     };
     let selected = run_inner(conn, text, None, ctx, page, true, false, template.as_ref()).await?;
     let signature = selected
