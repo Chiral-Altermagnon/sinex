@@ -2,7 +2,7 @@
 //! `show`, and read-only SQL. Each page uses one read-only repeatable snapshot.
 //! Continuations keep the original question, clock and event position; a
 //! changed visible ordered answer requires a fresh query. Rows use the table's
-//! field names; times are UTC.
+//! field names; times use the query context zone.
 mod compile;
 pub mod continuation;
 mod cursor;
@@ -227,9 +227,12 @@ async fn run_inner(
     if !in_snapshot {
         read_one_snapshot(&mut tx).await?;
     }
-    sqlx::query!("SET LOCAL TimeZone = 'UTC'")
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&format!(
+        "SET LOCAL TimeZone = '{}'",
+        ctx.zone_name().replace('\'', "''")
+    ))
+    .execute(&mut *tx)
+    .await?;
     let size = page.size.unwrap_or(DEFAULT_PAGE).max(1);
     if size > i64::MAX as u64 {
         return Err(Error::Invalid("page size is out of range".into()));
@@ -413,7 +416,7 @@ async fn run_inner(
                 .and_then(Json::as_object)
                 .map(|o| o.keys().cloned().collect())
                 .unwrap_or_default();
-            let reading = read_as(query);
+            let reading = read_as(query, &read.ctx.zone);
             use continuation::{Direction, Position, compare_positions};
             let position = |row: &Json| Position {
                 values: vec![
@@ -529,7 +532,7 @@ async fn run_inner(
             page_of(&mut tx, rendered, table, text, query, &read, Some(account)).await?
         }
     };
-    answer.read_as = read_as(query);
+    answer.read_as = read_as(query, &read.ctx.zone);
     tx.commit().await?;
     Ok(selected::SelectedPage {
         answer,
@@ -780,7 +783,7 @@ async fn page_of(
     Ok(Answer {
         table,
         query: text.into(),
-        read_as: read_as(query),
+        read_as: read_as(query, &read.ctx.zone),
         resolved: read.resolved(),
         columns: rendered.columns,
         rows: selected

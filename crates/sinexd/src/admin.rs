@@ -5,6 +5,21 @@ use crate::{api, catalog, reader_context};
 use clap::Subcommand;
 use std::path::PathBuf;
 
+pub(crate) fn emit(text: &str) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }
+        eprintln!("sinexd: stdout: {error}");
+        std::process::exit(i32::from(command_surface::FailureKind::Io.exit_code()));
+    }
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Admin {
     /// Read-only checks that work without a running daemon.
@@ -91,7 +106,7 @@ async fn schema(database: &str, mappings: Vec<String>, upgrade: bool) -> Result<
         sinex_schema::start(&mut connection, &kind_prefixes).await
     };
     applied
-        .map(|applied| println!("{applied}"))
+        .map(|applied| emit(&format!("{applied}\n")))
         .map_err(Error::from)
 }
 
@@ -106,7 +121,7 @@ pub(crate) async fn run(
             Ok(()) => Ok(()),
             Err(error) => {
                 let failure = error.failure();
-                println!("{}", serde_json::json!({ "error": failure }));
+                emit(&format!("{}\n", serde_json::json!({ "error": failure })));
                 Err(failure.into())
             }
         },
@@ -127,7 +142,7 @@ pub(crate) async fn run(
                 .map_err(Error::from)
         }
         Admin::Catalog => {
-            print!("{}", catalog::render());
+            emit(&format!("{}", catalog::render()));
             Ok(())
         }
         // `sinexctl` reads the manifest, or the failure, from standard output.
@@ -139,12 +154,15 @@ pub(crate) async fn run(
             .await;
             match copied {
                 Ok(manifest) => {
-                    println!("{}", serde_json::json!({ "manifest": manifest }));
+                    emit(&format!(
+                        "{}\n",
+                        serde_json::json!({ "manifest": manifest })
+                    ));
                     Ok(())
                 }
                 Err(error) => {
                     let failure = error.failure();
-                    println!("{}", serde_json::json!({ "error": failure }));
+                    emit(&format!("{}\n", serde_json::json!({ "error": failure })));
                     Err(failure.into())
                 }
             }
@@ -191,10 +209,10 @@ pub(crate) async fn run(
                     )
                 })
                 .collect::<Vec<_>>();
-            println!(
-                "{}",
+            emit(&format!(
+                "{}\n",
                 subjects.authorization((&daemon_user, &daemon_hash), &users, &consumers)
-            );
+            ));
             Ok(())
         }
     }
@@ -366,18 +384,18 @@ async fn admin_table(
     ctx.close().await?;
     match reply {
         sinex_protocol::Reply::Ok { result } => {
-            println!(
-                "{}",
+            emit(&format!(
+                "{}\n",
                 serde_json::to_string_pretty(&result).expect("JSON values print")
-            );
+            ));
             Ok(())
         }
         sinex_protocol::Reply::Failed { failure } => Err(failure.into()),
         sinex_protocol::Reply::StoppedEarly { failure, result } => {
-            println!(
-                "{}",
+            emit(&format!(
+                "{}\n",
                 serde_json::to_string_pretty(&result).expect("JSON values print")
-            );
+            ));
             Err(failure.into())
         }
     }

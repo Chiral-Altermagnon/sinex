@@ -11,7 +11,7 @@ fn the_cli_is_generated_from_the_table() {
         .try_get_matches_from([
             "sinexctl",
             "search",
-            "--page",
+            "--page-size",
             "5",
             "cargo test",
             "tide",
@@ -25,7 +25,7 @@ fn the_cli_is_generated_from_the_table() {
         args["words"],
         Value::String("\"cargo test\" tide -la".into())
     );
-    assert_eq!(args["page"], Value::from(5u64));
+    assert_eq!(args["page-size"], Value::from(5u64));
     let m = cli()
         .try_get_matches_from([
             "sinexctl",
@@ -44,7 +44,7 @@ fn the_cli_is_generated_from_the_table() {
         request,
         Request::Query {
             query: "commands where exit_code != 0".into(),
-            page: None,
+            page_size: None,
             cursor: None
         }
     );
@@ -116,7 +116,7 @@ fn cli_discovery_lists_stage_decisions_and_recall() {
         Request::Recall {
             around: Some("yesterday".into()),
             cwd: None,
-            page: None,
+            page_size: None,
             cursor: None
         }
     );
@@ -141,7 +141,7 @@ fn recall_cwd_can_follow_last_and_preserves_path_text() {
             Request::Recall {
                 around: Some("last".into()),
                 cwd: Some(path.into()),
-                page: None,
+                page_size: None,
                 cursor: None
             }
         );
@@ -168,7 +168,7 @@ fn schema_field_discovery_uses_the_shared_request_table() {
             "fields",
             "--kind",
             "command.executed",
-            "--page",
+            "--page-size",
             "3",
         ])
         .unwrap();
@@ -182,7 +182,7 @@ fn schema_field_discovery_uses_the_shared_request_table() {
         request,
         Request::Fields {
             kind: Some("command.executed".into()),
-            page: Some(3),
+            page_size: Some(3),
             cursor: None
         }
     );
@@ -215,5 +215,78 @@ fn read_deadline_is_global_and_typed_before_the_query_text() {
         cli()
             .try_get_matches_from(["sinexctl", "--deadline", "-1", "query", "events"])
             .is_err()
+    );
+}
+
+#[devkit::test]
+fn help_starts_with_status_and_query_examples() {
+    let rendered = cli().render_help().to_string();
+    let first_commands: Vec<_> = rendered
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take(5)
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        first_commands,
+        ["status", "query", "recall", "brief", "search"]
+    );
+    for command in COMMANDS {
+        let help = sinex_protocol::cli::subcommand(command)
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("Examples:"), "{}: {help}", command.name);
+        for example in command.examples {
+            assert!(help.contains(example), "{example}: {help}");
+        }
+    }
+    let help = sinex_protocol::cli::subcommand(sinex_protocol::command("query").unwrap())
+        .render_long_help()
+        .to_string();
+    for word in [
+        "events",
+        "commands",
+        "shell-sessions",
+        "materials",
+        "runs",
+        "sources",
+        "archive",
+        "failures",
+        "docs/query.md",
+    ] {
+        assert!(help.contains(word), "{word}: {help}");
+    }
+}
+
+#[devkit::test]
+fn replay_and_whole_answer_options_stay_distinct() {
+    let matches = cli()
+        .try_get_matches_from(["sinexctl", "--all", "replay", "--every-change", "--dry-run"])
+        .unwrap();
+    assert!(matches.get_flag("all"));
+    let (name, sub) = matches.subcommand().unwrap();
+    let request =
+        Request::from_args(name, arguments(sinex_protocol::command(name).unwrap(), sub)).unwrap();
+    assert!(matches!(
+        request,
+        Request::Replay {
+            every_change: Some(true),
+            dry_run: Some(true),
+            ..
+        }
+    ));
+}
+
+#[devkit::test]
+fn list_page_hint_keeps_the_filters() {
+    let request = Request::Comparisons {
+        derivation: Some("shell.sessions".into()),
+        page_size: Some(3),
+        cursor: Some("previous".into()),
+    };
+    assert_eq!(
+        next_page_command(sinex_protocol::command("comparisons").unwrap(), &request),
+        "sinexctl comparisons 'shell.sessions' --page-size '3'"
     );
 }

@@ -173,7 +173,7 @@ impl Finding {
                 let at_least = if state == "recorded" { "at least " } else { "" };
                 format!(
                     "{description} ({metric}) on {unit}: {at_least}{}",
-                    num(*value)
+                    number(*value)
                 )
             }
             Template::MetricChange {
@@ -185,8 +185,8 @@ impl Finding {
             } => {
                 format!(
                     "{metric}: {} on {unit_b}, against {} on {unit_a}",
-                    num(*b),
-                    num(*a)
+                    number(*b),
+                    number(*a)
                 )
             }
             Template::Association {
@@ -201,13 +201,14 @@ impl Finding {
                 family_size,
             } => {
                 let mut t = format!(
-                    "{x} and {y} (lag {lag}) are associated, r = {r:.2} over {n} units (effective {n_eff:.1})"
+                    "{x} and {y} (lag {lag}) are associated, r = {} over {n} units (effective {n_eff:.1})",
+                    number(*r)
                 );
                 if let Some([lo, hi]) = ci95 {
-                    let _ = write!(t, ", 95% interval {lo:.2} to {hi:.2}");
+                    let _ = write!(t, ", 95% interval {} to {}", number(*lo), number(*hi));
                 }
                 if let Some(q) = q {
-                    let _ = write!(t, ", q = {q:.3} across {family_size} tested pairs");
+                    let _ = write!(t, ", q = {} across {family_size} tested pairs", number(*q));
                 }
                 t
             }
@@ -219,8 +220,8 @@ impl Finding {
                 method,
             } => format!(
                 "{metric} shifted from about {} to about {} at {boundary} ({method})",
-                num(*before),
-                num(*after)
+                number(*before),
+                number(*after)
             ),
             Template::Deviation {
                 metric,
@@ -230,8 +231,8 @@ impl Finding {
                 distance,
             } => format!(
                 "{metric} on {unit} was {}, against a median of {} over the prior window ({distance:+.1} robust units)",
-                num(*value),
-                num(*median)
+                number(*value),
+                number(*median)
             ),
             Template::NotFound { what, scope } => format!("No {what} in {scope}"),
             Template::Missing {
@@ -252,13 +253,14 @@ impl Finding {
                 to,
                 units,
             } => format!(
-                "{metric} {} by {:.2} per day from {from} to {to} ({units} days, Mann-Kendall p = {p:.3})",
+                "{metric} {} by {} per day from {from} to {to} ({units} days, Mann-Kendall p = {})",
                 if *slope_per_unit >= 0.0 {
                     "rose"
                 } else {
                     "fell"
                 },
-                slope_per_unit.abs()
+                number(slope_per_unit.abs()),
+                number(*p)
             ),
             Template::Coverage {
                 source,
@@ -293,7 +295,10 @@ impl Finding {
                     n,
                     min_detectable_r,
                 } => match min_detectable_r {
-                    Some(m) => format!("{n} units; effects below r = {m:.2} would go undetected"),
+                    Some(m) => format!(
+                        "{n} units; effects below r = {} would go undetected",
+                        number(*m)
+                    ),
                     None => format!("{n} units"),
                 },
                 Caveat::Provisional => "the day is not over".into(),
@@ -320,11 +325,22 @@ fn one_line(text: &str) -> String {
     output
 }
 
-fn num(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
+/// Integers stay whole; small nonzero values keep three significant digits.
+pub fn number(v: f64) -> String {
+    if v == 0.0 {
+        "0".into()
+    } else if !v.is_finite() {
+        v.to_string()
+    } else if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else if v.abs() >= 1.0 {
         format!("{v:.2}")
+    } else {
+        let decimals = (2.0 - v.abs().log10().floor()) as usize;
+        format!("{v:.decimals$}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 

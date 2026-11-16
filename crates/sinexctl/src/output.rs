@@ -4,23 +4,44 @@
 use serde_json::Value;
 use std::fmt::Write;
 
+/// Write stdout as a Unix filter: a closed reader ends the process quietly.
+pub(crate) fn emit(text: &str) {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }
+        eprintln!("sinexctl: stdout: {error}");
+        std::process::exit(i32::from(command_surface::FailureKind::Io.exit_code()));
+    }
+}
+
 /// Widest a cell is shown; longer values end in `…`. Presentation only: the
 /// row is whole in `--json`.
 const CELL: usize = 60;
 
 pub(crate) struct Local {
     zone: jiff::tz::TimeZone,
+    zone_name: String,
 }
 
 impl Local {
     pub(crate) fn new(zone_name: Option<&str>) -> Self {
-        let zone = zone_name
-            .and_then(|z| jiff::tz::TimeZone::get(z).ok())
-            .unwrap_or_else(jiff::tz::TimeZone::system);
-        Self { zone }
+        let (zone, zone_name) = zone_name
+            .and_then(|name| {
+                jiff::tz::TimeZone::get(name)
+                    .ok()
+                    .map(|zone| (zone, name.to_owned()))
+            })
+            .unwrap_or_else(|| (jiff::tz::TimeZone::UTC, "UTC".to_owned()));
+        Self { zone, zone_name }
     }
 
-    /// A UTC time as local `YYYY-MM-DD HH:MM:SS`; other text unchanged.
+    /// An instant in the answer's zone, with its UTC offset; other text unchanged.
     fn time(&self, s: &str) -> Option<String> {
         if s.len() < 20 || !s.as_bytes()[..4].iter().all(u8::is_ascii_digit) {
             return None;
@@ -28,7 +49,7 @@ impl Local {
         let ts: jiff::Timestamp = s.parse().ok()?;
         Some(
             ts.to_zoned(self.zone.clone())
-                .strftime("%Y-%m-%d %H:%M:%S")
+                .strftime("%Y-%m-%d %H:%M:%S%:z")
                 .to_string(),
         )
     }
@@ -149,7 +170,7 @@ pub(crate) fn answer(result: &Value, local: &Local, next_hint: Option<&str>) -> 
         }
     }
     let total = result["total"].as_i64().unwrap_or(rows.len() as i64);
-    let zone = result["resolved"]["zone"].as_str().unwrap_or("UTC");
+    let zone = &local.zone_name;
     let _ = write!(out, "{} of {total} rows; times in {zone}", rows.len());
     match (result["page"]["cursor"].as_str(), next_hint) {
         (Some(c), Some(hint)) => {

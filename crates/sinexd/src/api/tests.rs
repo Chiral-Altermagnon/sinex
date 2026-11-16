@@ -177,6 +177,18 @@ async fn world_with_api(
     crate::catalog::install_built_in_sources(&mut connection)
         .await
         .unwrap();
+    let exclusions = source_config
+        .exclude
+        .iter()
+        .filter_map(|(name, exclusion)| {
+            exclusion
+                .as_ref()
+                .map(|exclusion| (name.clone(), exclusion.reason.clone()))
+        })
+        .collect();
+    sinex_store::registry::write_exclusions(&mut connection, &exclusions)
+        .await
+        .unwrap();
     let (handle, queues) = writer::channels();
     tokio::spawn(writer::run(
         url.clone(),
@@ -335,7 +347,7 @@ async fn replay_is_offered_through_the_api(db: devkit::pg::TestDatabase) {
     let (_, body) = call_unbounded(
         &w,
         Some(AGENT),
-        json!({"method": "replay", "binding": "nothing@here", "compare": true}),
+        json!({"method": "replay", "binding": "nothing@here", "dry-run": true}),
     )
     .await;
     assert_eq!(body["outcome"], json!("ok"), "{body}");
@@ -456,7 +468,7 @@ async fn sql_answers_a_page_at_a_time_and_every_row_is_reachable(db: devkit::pg:
         let (_, body) = call_unbounded(
             &w,
             Some(READ),
-            json!({"method": "sql", "sql": sql, "page": 3, "cursor": cursor}),
+            json!({"method": "sql", "sql": sql, "page-size": 3, "cursor": cursor}),
         )
         .await;
         let rows = body["result"]["rows"]
@@ -483,7 +495,7 @@ async fn sql_pages_end_early_once_they_hold_their_bytes(db: devkit::pg::TestData
     let (_, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "sql", "sql": sql, "page": 10}),
+        json!({"method": "sql", "sql": sql, "page-size": 10}),
     )
     .await;
     let first = body["result"]["rows"].as_array().unwrap().len();
@@ -495,7 +507,7 @@ async fn sql_pages_end_early_once_they_hold_their_bytes(db: devkit::pg::TestData
     let (_, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "sql", "sql": sql, "page": 10, "cursor": cursor}),
+        json!({"method": "sql", "sql": sql, "page-size": 10, "cursor": cursor}),
     )
     .await;
     assert!(
@@ -511,7 +523,7 @@ async fn an_sql_cursor_serves_only_its_statement_and_caller(db: devkit::pg::Test
     let (_, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "sql", "sql": sql, "page": 1}),
+        json!({"method": "sql", "sql": sql, "page-size": 1}),
     )
     .await;
     let cursor = body["result"]["page"]["cursor"]
@@ -521,21 +533,21 @@ async fn an_sql_cursor_serves_only_its_statement_and_caller(db: devkit::pg::Test
     let (_, other) = call_unbounded(
         &w,
         Some(OPERATOR),
-        json!({"method": "sql", "sql": sql, "page": 1, "cursor": cursor}),
+        json!({"method": "sql", "sql": sql, "page-size": 1, "cursor": cursor}),
     )
     .await;
     assert_eq!(other["outcome"], json!("failed"), "{other}");
     let (_, other) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "sql", "sql": "SELECT 1 AS n", "page": 1, "cursor": cursor}),
+        json!({"method": "sql", "sql": "SELECT 1 AS n", "page-size": 1, "cursor": cursor}),
     )
     .await;
     assert_eq!(other["outcome"], json!("failed"), "{other}");
     let (_, next) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "sql", "sql": sql, "page": 1, "cursor": cursor}),
+        json!({"method": "sql", "sql": sql, "page-size": 1, "cursor": cursor}),
     )
     .await;
     assert_eq!(next["result"]["rows"], json!([{"n": 2}]), "{next}");
@@ -946,7 +958,7 @@ async fn analysis_calls_run_and_brief_through_the_api(db: devkit::pg::TestDataba
         .clone();
     assert_eq!(commands["counts"][0]["event_type"], "command.fused");
 
-    let run = json!({"method": "analysis-run", "recipe": "deviations", "from": "2026-09-01", "to": "2026-09-30"});
+    let run = json!({"method": "analysis-run", "recipe": "deviations", "first": "2026-09-01", "last": "2026-09-30"});
     let (status, body) = call_unbounded(&w, Some(READ), run).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
@@ -970,7 +982,7 @@ async fn analysis_calls_run_and_brief_through_the_api(db: devkit::pg::TestDataba
     let (_, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "analysis-run", "recipe": "astrology", "from": "2026-09-01", "to": "2026-09-02"}),
+        json!({"method": "analysis-run", "recipe": "astrology", "first": "2026-09-01", "last": "2026-09-02"}),
     )
     .await;
     assert!(
@@ -987,7 +999,7 @@ async fn analysis_panel_and_why_answer_through_the_api(db: devkit::pg::TestDatab
     let (status, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method": "analysis-panel", "from": "2026-09-14", "to": "2026-09-15", "metric": ["shell.commands"]}),
+        json!({"method": "analysis-panel", "first": "2026-09-14", "last": "2026-09-15", "metric": ["shell.commands"]}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1057,7 +1069,11 @@ mod queries;
 
 mod enable_status;
 
+mod comparisons;
+mod dry_run;
+mod examples;
 mod failures;
+mod status;
 
 #[devkit::test]
 async fn declaration_discovery_pages_through_the_public_commands(db: devkit::pg::TestDatabase) {
@@ -1068,7 +1084,7 @@ async fn declaration_discovery_pages_through_the_public_commands(db: devkit::pg:
         let (status, body) = call_unbounded(
             &w,
             Some(READ),
-            json!({"method":"kinds","page":7,"cursor":cursor}),
+            json!({"method":"kinds","page-size":7,"cursor":cursor}),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -1087,7 +1103,7 @@ async fn declaration_discovery_pages_through_the_public_commands(db: devkit::pg:
     let (status, body) = call_unbounded(
         &w,
         Some(READ),
-        json!({"method":"fields","kind":"command.executed","page":1}),
+        json!({"method":"fields","kind":"command.executed","page-size":1}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");

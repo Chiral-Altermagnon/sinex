@@ -51,7 +51,7 @@ async fn every_sqlx_error_class_maps_to_its_kind(db: devkit::pg::TestDatabase) {
     expect(&serialization, FailureKind::Conflict, true, "40001");
 
     let other = failure_of(&url, &["SELECT 1 / 0"]).await;
-    expect(&other, FailureKind::Io, false, "22012");
+    expect(&other, FailureKind::Internal, false, "22012");
 
     // One connection, held: the next acquire waits out its timeout.
     let pool = PgPoolOptions::new()
@@ -114,4 +114,24 @@ fn blob_errors_keep_their_kind() {
     assert_eq!(blob_failure(&locked).kind, FailureKind::Refused);
     let unwrap = hashed_blobs::Error::Unwrap("wrong key".into());
     assert_eq!(blob_failure(&unwrap).kind, FailureKind::Io);
+}
+
+#[devkit::test]
+async fn internal_errors_are_internal(db: devkit::pg::TestDatabase) {
+    let failure = failure_of(&db.url(None), &[
+        "DO $$ BEGIN RAISE EXCEPTION 'synthetic stored data error' USING ERRCODE = 'ZZ001'; END $$",
+    ]).await;
+    expect(&failure, FailureKind::Internal, false, "ZZ001");
+    let schema = schema_failure(sinex_schema::Error::Declaration(
+        "synthetic definition".into(),
+    ));
+    assert_eq!(
+        (schema.kind, schema.retryable),
+        (FailureKind::Internal, false)
+    );
+    let protocol = database_failure(&sqlx::Error::Protocol("synthetic protocol error".into()));
+    assert_eq!(
+        (protocol.kind, protocol.retryable),
+        (FailureKind::Internal, false)
+    );
 }

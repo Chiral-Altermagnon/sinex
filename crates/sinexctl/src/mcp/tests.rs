@@ -2,8 +2,22 @@ use super::*;
 use sinex_protocol::Request;
 
 #[devkit::test]
-fn tools_come_from_the_command_table() {
+fn tool_examples_follow_the_table() {
     let tools = tools();
+    eprintln!(
+        "MCP tool-schema bytes: {}",
+        serde_json::to_vec(&tools).unwrap().len()
+    );
+    for command in COMMANDS.iter().filter(|command| command.mcp) {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == format!("sinex_{}", command.name))
+            .unwrap();
+        let description = tool.description.as_deref().unwrap();
+        for example in command.examples {
+            assert!(description.contains(example), "{example}: {description}");
+        }
+    }
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.contains(&"sinex_query"));
     assert!(names.contains(&"sinex_recall"));
@@ -20,20 +34,23 @@ fn tools_come_from_the_command_table() {
     assert_eq!(stage.input_schema["required"], json!(["path"]));
     assert_eq!(stage.input_schema["properties"]["path"]["type"], "array");
     assert_eq!(stage.input_schema["properties"]["parser"]["type"], "array");
-    assert!(!names.contains(&"sinex_mark"), "marks are the operator's");
+    assert_eq!(
+        sinex_protocol::command("mark").unwrap().access,
+        sinex_protocol::Access::Operator
+    );
     for name in [
         "sinex_context",
         "sinex_timeline",
-        "sinex_query-save",
+        "sinex_save",
         "sinex_query-list",
         "sinex_query-complete",
     ] {
         assert!(names.contains(&name), "{name}");
     }
-    assert!(!names.contains(&"sinex_follow"), "follow streams");
-    assert!(
-        !names.contains(&"sinex_tombstone"),
-        "tombstoning is the operator's"
+
+    assert_eq!(
+        sinex_protocol::command("tombstone").unwrap().access,
+        sinex_protocol::Access::Operator
     );
     for name in [
         "sinex_archive",
@@ -68,18 +85,23 @@ fn declaration_discovery_exposes_the_same_paginated_requests() {
             .iter()
             .find(|t| t.name == format!("sinex_{name}"))
             .unwrap();
-        assert_eq!(tool.input_schema["properties"]["page"]["type"], "integer");
+        assert_eq!(
+            tool.input_schema["properties"]["page-size"]["type"],
+            "integer"
+        );
         assert_eq!(tool.input_schema["properties"]["cursor"]["type"], "string");
         let request = Request::from_args(
             name,
-            serde_json::from_value(json!({"kind":"example.reading","page":3,"cursor":"saved"}))
-                .unwrap(),
+            serde_json::from_value(
+                json!({"kind":"example.reading","page-size":3,"cursor":"saved"}),
+            )
+            .unwrap(),
         )
         .unwrap();
         let encoded = serde_json::to_value(request).unwrap();
         assert_eq!(encoded["method"], name);
         assert_eq!(encoded["kind"], "example.reading");
-        assert_eq!(encoded["page"], 3);
+        assert_eq!(encoded["page-size"], 3);
         assert_eq!(encoded["cursor"], "saved");
     }
 }
@@ -116,7 +138,7 @@ fn tool_effects_match_backend_command_access() {
 
 #[devkit::test]
 fn status_data_is_structured_without_losing_the_data_notice() {
-    let data = json!({"commit_seq": 42, "search_index": {"position": 40, "behind": 2}});
+    let data = json!({"commit_seq": 42, "verdict":{"state":"healthy"}, "consumers": [{"name":"search index","position":40,"behind":2}]});
     let reply = success_result(data.clone());
     assert_eq!(reply.structured_content, Some(data));
     let encoded = serde_json::to_value(reply).unwrap();
