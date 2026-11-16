@@ -23,7 +23,7 @@ fn query_requests_keep_bytes_and_use_manifest_authorship_without_changing_the_ma
     let material = acquired.material.unwrap();
     assert!(String::from_utf8_lossy(&material.bytes).contains("spoofed"));
     let result = drain(
-        &RequestParser,
+        &Stateless(RequestParser),
         DrainInput {
             source: REQUEST.name,
             class: REQUEST.class,
@@ -71,7 +71,7 @@ fn saved_query_records_parse_without_reading_referenced_definitions() {
     .material
     .unwrap();
     let result = drain(
-        &RequestParser,
+        &Stateless(RequestParser),
         DrainInput {
             source: REQUEST.name,
             class: REQUEST.class,
@@ -113,7 +113,7 @@ fn saved_query_records_carry_their_parsed_template() {
         .unwrap();
     let read = |material: &NewMaterial| {
         drain(
-            &RequestParser,
+            &Stateless(RequestParser),
             DrainInput {
                 source: REQUEST.name,
                 class: REQUEST.class,

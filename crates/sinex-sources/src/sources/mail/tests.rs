@@ -1,4 +1,5 @@
 use super::*;
+use sinex_model::Class;
 
 const MESSAGE: &[u8] = b"From 1234@xxx Tue Mar 05 10:00:00 +0000 2024\n\
 X-GM-THRID: 1790000000000000001\n\
@@ -27,8 +28,8 @@ aGVsbG8=\n\
 
 #[devkit::test]
 fn reads_headers_labels_text_and_attachments() {
-    let (m, ()) = MailParser
-        .parse(&MESSAGE, &(), &sinex_source_core::RecordContext::none())
+    let m = MailParser
+        .parse(&MESSAGE, &sinex_source_core::RecordContext::none())
         .unwrap();
     let m = &m[0];
     assert_eq!(m.message_id.as_deref(), Some("abc@example.com"));
@@ -49,10 +50,9 @@ fn reads_headers_labels_text_and_attachments() {
 
 #[devkit::test]
 fn a_message_without_id_or_date_keeps_both_unknown() {
-    let (m, ()) = MailParser
+    let m = MailParser
         .parse(
             &&b"Subject: x\n\nbody\n"[..],
-            &(),
             &sinex_source_core::RecordContext::none(),
         )
         .unwrap();
@@ -76,9 +76,8 @@ fn maildir_selects_message_files() {
 
 fn parse(raw: &[u8]) -> MailMessage {
     MailParser
-        .parse(&raw, &(), &sinex_source_core::RecordContext::none())
+        .parse(&raw, &sinex_source_core::RecordContext::none())
         .unwrap()
-        .0
         .remove(0)
 }
 
@@ -188,7 +187,7 @@ fn a_deleted_maildir_message_is_removed_where_it_was_read() {
     );
     // The renamed file is read again; the removal markers read as nothing.
     let chunks = sinex_source_core::drain(
-        &MailParser,
+        &Stateless(MailParser),
         sinex_source_core::DrainInput {
             source: "communication.maildir",
             class: Class::Open,
@@ -246,11 +245,7 @@ fn maildir_coordinates_distinguish_equal_messages_and_survive_flag_changes() {
             manifest: &manifest,
             member: manifest.member_at(0),
         };
-        MaildirParser
-            .parse(&raw, &(), &context)
-            .unwrap()
-            .0
-            .remove(0)
+        MaildirParser.parse(&raw, &context).unwrap().remove(0)
     };
     let original = read("h", "/mail", "INBOX/new/one");
     let renamed = read("h", "/mail", "INBOX/cur/one:2,RS");
@@ -306,14 +301,12 @@ fn raw_byte_maildir_names_keep_identity_across_flag_changes() {
         MaildirParser
             .parse(
                 &raw,
-                &(),
                 &RecordContext {
                     manifest: &manifest,
                     member: manifest.member_at(0),
                 },
             )
             .unwrap()
-            .0
             .remove(0)
     };
     let raw_name = read("INBOX/new/a%FF", Some(b"INBOX/new/a\xff"));

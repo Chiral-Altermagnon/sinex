@@ -15,6 +15,7 @@ pub mod discovery;
 pub mod drain;
 pub mod drivers;
 pub mod gaps;
+pub mod markup;
 pub mod nats;
 pub mod registry;
 pub mod sampling;
@@ -39,6 +40,30 @@ pub struct RecordError(pub String);
 impl RecordError {
     pub fn new(reason: impl Into<String>) -> Self {
         Self(reason.into())
+    }
+}
+
+/// `Option` gives the reason alone; `Result` gives "reason: cause".
+pub trait RecordResult<T> {
+    fn record(self, reason: &'static str) -> Result<T, RecordError>;
+    fn record_with(self, reason: impl FnOnce() -> String) -> Result<T, RecordError>;
+}
+
+impl<T> RecordResult<T> for Option<T> {
+    fn record(self, reason: &'static str) -> Result<T, RecordError> {
+        self.ok_or_else(|| RecordError::new(reason))
+    }
+    fn record_with(self, reason: impl FnOnce() -> String) -> Result<T, RecordError> {
+        self.ok_or_else(|| RecordError::new(reason()))
+    }
+}
+
+impl<T, E: std::fmt::Display> RecordResult<T> for Result<T, E> {
+    fn record(self, reason: &'static str) -> Result<T, RecordError> {
+        self.map_err(|cause| RecordError::new(format!("{reason}: {cause}")))
+    }
+    fn record_with(self, reason: impl FnOnce() -> String) -> Result<T, RecordError> {
+        self.map_err(|cause| RecordError::new(format!("{}: {cause}", reason())))
     }
 }
 
@@ -72,8 +97,7 @@ impl<'a> RecordShape<'a> for &'a [u8] {
 impl<'a> RecordShape<'a> for serde_json::Map<String, serde_json::Value> {
     const STREAMING: bool = true;
     fn decode_reader(reader: &mut dyn std::io::Read) -> Result<Self, RecordError> {
-        serde_json::from_reader(reader)
-            .map_err(|error| RecordError::new(format!("record is not a JSON object: {error}")))
+        serde_json::from_reader(reader).record("record is not a JSON object")
     }
     fn decoded_hash(&self, raw_hash: [u8; 32], volatile: &[&str]) -> [u8; 32] {
         if volatile.is_empty() {
@@ -89,8 +113,7 @@ impl<'a> RecordShape<'a> for serde_json::Map<String, serde_json::Value> {
     }
 
     fn decode(raw: &'a [u8]) -> Result<Self, RecordError> {
-        serde_json::from_slice(raw)
-            .map_err(|e| RecordError::new(format!("record is not a JSON object: {e}")))
+        serde_json::from_slice(raw).record("record is not a JSON object")
     }
 
     fn hash(raw: &[u8], volatile: &[&str]) -> [u8; 32] {
@@ -160,6 +183,59 @@ pub trait Parser: Send + Sync + 'static {
         carry: &Self::Carry,
         context: &RecordContext<'_>,
     ) -> Result<(Vec<Self::Payload>, Self::Carry), RecordError>;
+}
+
+/// A parser whose records do not carry state to the next record.
+pub trait StatelessParser: Send + Sync + 'static {
+    type Record<'a>: RecordShape<'a>;
+    type Payload: Payloads;
+    const READS_BLANK_RECORDS: bool = false;
+    const VOLATILE: &'static [&'static str] = &[];
+    fn record_hash(&self, raw: &[u8], _context: &RecordContext<'_>) -> [u8; 32] {
+        <Self::Record<'_> as RecordShape>::hash(raw, Self::VOLATILE)
+    }
+    fn streamed_record_hash(
+        &self,
+        record: &Self::Record<'_>,
+        raw_hash: [u8; 32],
+        _context: &RecordContext<'_>,
+    ) -> [u8; 32] {
+        record.decoded_hash(raw_hash, Self::VOLATILE)
+    }
+    fn parse(
+        &self,
+        record: &Self::Record<'_>,
+        context: &RecordContext<'_>,
+    ) -> Result<Vec<Self::Payload>, RecordError>;
+}
+
+pub struct Stateless<P>(pub P);
+
+impl<P: StatelessParser> Parser for Stateless<P> {
+    type Record<'a> = P::Record<'a>;
+    type Carry = ();
+    type Payload = P::Payload;
+    const READS_BLANK_RECORDS: bool = P::READS_BLANK_RECORDS;
+    const VOLATILE: &'static [&'static str] = P::VOLATILE;
+    fn record_hash(&self, raw: &[u8], context: &RecordContext<'_>) -> [u8; 32] {
+        self.0.record_hash(raw, context)
+    }
+    fn streamed_record_hash(
+        &self,
+        record: &Self::Record<'_>,
+        raw_hash: [u8; 32],
+        context: &RecordContext<'_>,
+    ) -> [u8; 32] {
+        self.0.streamed_record_hash(record, raw_hash, context)
+    }
+    fn parse(
+        &self,
+        record: &Self::Record<'_>,
+        _: &(),
+        context: &RecordContext<'_>,
+    ) -> Result<(Vec<Self::Payload>, ()), RecordError> {
+        Ok((self.0.parse(record, context)?, ()))
+    }
 }
 
 #[cfg(test)]

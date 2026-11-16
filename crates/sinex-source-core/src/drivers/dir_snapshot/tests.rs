@@ -305,7 +305,7 @@ fn empty_and_nonempty_members_keep_body_ranges_in_every_order() {
             assert_eq!(end - start, body.len());
         }
         let chunks = drain(
-            &notes::NotesParser,
+            &crate::Stateless(notes::NotesParser),
             crate::DrainInput {
                 source: "synthetic",
                 class: Class::Open,
@@ -633,7 +633,7 @@ fn an_unreadable_entry_fails_only_its_record_and_is_retried() {
     let material = d.poll(&Value::Null, &mut state).unwrap().material.unwrap();
     assert_eq!(material.records.len(), 2);
     let chunks = drain(
-        &NotesParser,
+        &crate::Stateless(NotesParser),
         crate::DrainInput {
             source: "synthetic",
             class: Class::Open,

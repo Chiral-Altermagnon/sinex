@@ -13,6 +13,7 @@ use crate::drivers::{Acquired, DriverError};
 use crate::registry::{Source, SourceSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sinex_model::json::JsonExt;
 use std::path::{Path, PathBuf};
 
 /// The zone named `name` (an IANA name such as `Europe/Warsaw`), or this
@@ -71,7 +72,7 @@ impl Settings {
 
     /// A string option.
     pub fn option(&self, key: &str) -> Option<&str> {
-        self.options.get(key).and_then(Value::as_str)
+        self.options.str(key)
     }
 
     /// A declared boolean option from JSON or a command's key=value pair.
@@ -89,7 +90,7 @@ impl Settings {
 
     /// An unsigned option.
     pub fn number(&self, key: &str) -> Option<u64> {
-        self.options.get(key).and_then(Value::as_u64)
+        self.options.u64(key)
     }
 }
 
@@ -233,7 +234,7 @@ impl Reading {
 type ReaderFor = fn(&Binding) -> Result<Reading, String>;
 /// Live capture of one binding into its spool, until stopped or until the
 /// source ends; the number of captured lines or segments.
-pub type Capture = fn(&Binding, &crate::capture::CaptureStop) -> Result<u64, String>;
+pub use crate::discovery::Capture;
 
 /// An input format and the sources that read it: what `stage --parser
 /// FORMAT`, `sources.json` and `sinex-session` name.

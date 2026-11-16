@@ -27,9 +27,12 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sinex_model::{Class, InputRef, MaterialId, ObservationFacts, RevisionChange, Timestamp};
+use sinex_model::{InputRef, MaterialId, ObservationFacts, RevisionChange, Timestamp};
+use sinex_source_core::Stateless;
+use sinex_source_core::binding;
+use sinex_source_core::discovery::{DiscoverySpec, Location};
 use sinex_source_core::drivers::{Acquired, DriverError, NewMaterial};
-use sinex_source_core::registry::{DeclaredSource, Expectation, Origin, Shape, SourceSpec};
+use sinex_source_core::registry::{Expectation, Origin, Shape, SourceSpec};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -41,9 +44,7 @@ pub const SPEC: SourceSpec = SourceSpec {
     name: "communication.imap",
     origin: Origin::Input(Shape::ApiCursor),
     expect: Expectation::cadence_hours(1),
-    expires_after: None,
     purpose: "mail recall and correspondence history",
-    class: Class::Open,
     parser: "rfc5322-mail",
     parser_version: 3,
     event_types: &["mail.message"],
@@ -51,6 +52,7 @@ pub const SPEC: SourceSpec = SourceSpec {
         sinex_source_core::drivers::export_archive::frame_whole,
         sinex_source_core::drivers::export_archive::Framing::Whole,
     ),
+    ..SourceSpec::DEFAULT
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -594,51 +596,36 @@ fn read_memory(mut rest: &[u8]) -> Result<Vec<(u32, sinex_model::RecordLocation)
     Ok(out)
 }
 
-pub fn source() -> DeclaredSource<super::mail::MailParser> {
-    DeclaredSource {
-        spec: SPEC,
-        parser: super::mail::MailParser,
-    }
-}
-
-/// `stage --parser imap CONFIG.json`: live mail from the account CONFIG describes,
-/// the messages new since the last read.
-pub const FORMAT: sinex_source_core::binding::InputFormat =
-    sinex_source_core::binding::InputFormat {
-        name: "imap",
-        accepts: &[],
-        discovery: sinex_source_core::discovery::DiscoverySpec {
-            captured_by: sinex_source_core::discovery::CapturedBy::System,
-            locations: &[sinex_source_core::discovery::Location {
-                root: "input",
-                path: "imap",
-            }],
-            capabilities: &[],
-            credentials: &["token_file or password_file"],
-            streams: &[],
-        },
-        discover,
-        specs: || vec![&SPEC],
-        plan: Some(|input, settings| {
-            let config = config(input)?;
-            let mut b = sinex_source_core::binding::Binding::of(&SPEC, input, settings.clone());
-            b.name = format!(
-                "{}:{}@{}/{}@{}",
-                SPEC.name, config.username, config.host, config.mailbox, settings.host
-            );
-            Ok(vec![b])
-        }),
-        source: |_| Ok(Box::new(source())),
-        reader: Some(|b| {
-            Ok(sinex_source_core::binding::Reading::Polled(Box::new(
-                ImapReader::new(ImapMail {
-                    config: config(&b.input)?,
-                    host: b.settings.host.clone(),
-                }),
-            )))
-        }),
-        capture: None,
-    };
+input_format! {
+    /// `stage --parser imap CONFIG.json`: live mail from the account CONFIG describes,
+    /// the messages new since the last read.
+    pub FORMAT = "imap" {
+    specs: [SPEC],
+    parser: |_b| Stateless(super::mail::MailParser),
+    discovery: DiscoverySpec {
+        locations: &[Location::new("input", "imap")],
+        credentials: &["token_file or password_file"],
+        ..DiscoverySpec::DEFAULT
+    },
+    discover: discover,
+    plan: |input, settings| {
+        let config = config(input)?;
+        let mut b = binding::Binding::of(&SPEC, input, settings.clone());
+        b.name = format!(
+            "{}:{}@{}/{}@{}",
+            SPEC.name, config.username, config.host, config.mailbox, settings.host
+        );
+        Ok(vec![b])
+    },
+    reader: |b| {
+        Ok(binding::Reading::Polled(Box::new(ImapReader::new(
+            ImapMail {
+                config: config(&b.input)?,
+                host: b.settings.host.clone(),
+            },
+        ))))
+    },
+} }
 
 fn discover(
     format: &sinex_source_core::InputFormat,

@@ -6,7 +6,7 @@ use sinex_source_core::{DrainInput, Limits, drain};
 fn read(acquired: Acquired) -> (MaterialId, RecordOutcome) {
     let material = acquired.material.unwrap();
     let result = drain(
-        &RequestParser,
+        &Stateless(RequestParser),
         DrainInput {
             source: REQUEST.name,
             class: REQUEST.class,

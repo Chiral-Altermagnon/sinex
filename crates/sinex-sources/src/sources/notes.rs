@@ -7,13 +7,15 @@
 //! A note whose front matter declares an `id` is identified by that ID, so a
 //! renamed or moved note is a newer reading of the same note. Directory
 //! removals cite stored record locations, including when the content is sealed.
-use serde_json::Value;
+use sinex_model::Timestamp;
 use sinex_model::event_types::media::NoteDocument;
-use sinex_model::{Class, Timestamp};
+use sinex_model::json::JsonExt;
+use sinex_source_core::discovery::{DiscoverySpec, Location};
 use sinex_source_core::drain::RecordContext;
 use sinex_source_core::drivers::dir_snapshot::DirSnapshot;
+use sinex_source_core::drivers::export_archive::{Framing, frame_whole};
 use sinex_source_core::registry::{DeclaredSource, Expectation, Origin, Shape, SourceSpec};
-use sinex_source_core::{Parser, RecordError};
+use sinex_source_core::{Framer, RecordError, RecordResult, Stateless, StatelessParser};
 use std::path::PathBuf;
 
 mod metadata;
@@ -22,16 +24,12 @@ pub const SPEC: SourceSpec = SourceSpec {
     name: "knowledge.notes-vault",
     origin: Origin::Input(Shape::DirSnapshot),
     expect: Expectation::cadence_hours(1),
-    expires_after: None,
     purpose: "note recall and the library",
-    class: Class::Open,
     parser: "notes-vault",
     parser_version: 7,
     event_types: &["note.document"],
-    framer: sinex_source_core::Framer::export(
-        sinex_source_core::drivers::export_archive::frame_whole,
-        sinex_source_core::drivers::export_archive::Framing::Whole,
-    ),
+    framer: Framer::export(frame_whole, Framing::Whole),
+    ..SourceSpec::DEFAULT
 };
 
 /// The vault is named by its folder, from the material's path, so a replay
@@ -41,15 +39,13 @@ pub struct NotesParser;
 fn nanos(member: &sinex_model::Member, field: &str) -> Option<Timestamp> {
     member
         .details
-        .get(field)
-        .and_then(Value::as_str)
+        .str(field)
         .and_then(|s| s.parse::<i128>().ok())
         .and_then(|ns| Timestamp::from_unix_ns(ns).ok())
 }
 
-impl Parser for NotesParser {
+impl StatelessParser for NotesParser {
     type Record<'a> = &'a [u8];
-    type Carry = ();
     type Payload = NoteDocument;
 
     fn record_hash(&self, raw: &[u8], context: &RecordContext<'_>) -> [u8; 32] {
@@ -59,19 +55,18 @@ impl Parser for NotesParser {
     fn parse(
         &self,
         record: &&[u8],
-        _: &(),
         context: &RecordContext<'_>,
-    ) -> Result<(Vec<NoteDocument>, ()), RecordError> {
+    ) -> Result<Vec<NoteDocument>, RecordError> {
         let member = context
             .member
-            .ok_or_else(|| RecordError::new("a note needs its directory snapshot member"))?;
+            .record("a note needs its directory snapshot member")?;
         if member.details.contains_key("removed_at_ns") {
-            return Ok((Vec::new(), ()));
+            return Ok(Vec::new());
         }
         let path = member.path.clone();
         let text = Some(
             String::from_utf8(record.to_vec())
-                .map_err(|_| RecordError::new(format!("{path} is not UTF-8 text")))?,
+                .record_with(|| format!("{path} is not UTF-8 text"))?,
         );
         let metadata::Metadata {
             title,
@@ -98,11 +93,7 @@ impl Parser for NotesParser {
                 .detail("native_path_bytes")
                 .as_str()
                 .map(str::to_owned),
-            native_path_bytes: member
-                .details
-                .get("native_path_bytes")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            native_path_bytes: member.details.str("native_path_bytes").map(str::to_owned),
             path,
             size: text.as_ref().map_or(0, |t| t.len() as u64),
             text,
@@ -114,14 +105,14 @@ impl Parser for NotesParser {
             wikilinks,
             front_matter,
         };
-        Ok((vec![payload], ()))
+        Ok(vec![payload])
     }
 }
 
-pub fn source() -> DeclaredSource<NotesParser> {
+pub fn source() -> DeclaredSource<Stateless<NotesParser>> {
     DeclaredSource {
         spec: SPEC,
-        parser: NotesParser,
+        parser: Stateless(NotesParser),
     }
 }
 
@@ -142,35 +133,15 @@ pub fn driver(root: PathBuf, host: String) -> DirSnapshot {
     }
 }
 
-/// `stage --parser notes PATH`: the note vault at PATH, walked as one directory.
-pub const FORMAT: sinex_source_core::binding::InputFormat =
-    sinex_source_core::binding::InputFormat {
-        name: "notes",
-        accepts: &[],
-        discovery: sinex_source_core::discovery::DiscoverySpec {
-            captured_by: sinex_source_core::discovery::CapturedBy::System,
-            locations: &[sinex_source_core::discovery::Location {
-                root: "declared",
-                path: "notes",
-            }],
-            capabilities: &[],
-            credentials: &[],
-            streams: &[],
-        },
-        discover: crate::discovery::discover_format,
-        specs: || vec![&SPEC],
-        plan: Some(|input, settings| {
-            Ok(sinex_source_core::binding::single(&SPEC, input, settings))
-        }),
-        source: |_| Ok(Box::new(source())),
-        reader: Some(|b| {
-            Ok(sinex_source_core::binding::walked(driver(
-                b.input.clone(),
-                b.settings.host.clone(),
-            )))
-        }),
-        capture: None,
-    };
+super::input_format! {
+    /// `stage --parser notes PATH`: the note vault at PATH, walked as one directory.
+    pub FORMAT = "notes" {
+    specs: [SPEC],
+    source: |_b| Ok(Box::new(source())),
+    discovery: DiscoverySpec::system(&[Location::new("declared", "notes")]),
+    plan: single,
+    reader: walked(driver),
+} }
 
 #[cfg(test)]
 mod tests;

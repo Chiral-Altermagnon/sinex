@@ -8,6 +8,7 @@ use ::signals::notifications::{Notice, NotificationConfig, RouteCommand};
 use config::{Command, ValueTarget};
 use signal_delivery::{Deliverer, NotificationRequest, NotificationUpdate};
 use std::time::Duration;
+use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnector, Transport};
 
 /// Start the host's one desktop deliverer with its persisted state. Committed
 /// notices reach it through the returned channel; every state change comes
@@ -154,69 +155,78 @@ async fn value_effect(target: &ValueTarget, bytes: Vec<u8>, deadline: Duration) 
 /// Written beside the target and renamed over it, so a reader sees the old
 /// value or the new one, never a partial file.
 async fn file_value(path: &std::path::Path, bytes: &[u8]) -> DeliveryOutcome {
-    use tokio::io::AsyncWriteExt;
-    let Some(directory) = path.parent() else {
+    use sinex_transport::durable::{ReplaceStep, write_replacing};
+    use std::io::Write;
+    if path.parent().is_none() {
         return DeliveryOutcome::NotSent("value_file_parent".into());
-    };
-    let Ok(staged) = tempfile::TempPath::try_from_path(
-        directory.join(format!(".sinex-signal-{}", uuid::Uuid::now_v7())),
-    ) else {
-        return DeliveryOutcome::NotSent("value_stage_path".into());
-    };
-    let written = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&staged)
-            .await?;
-        file.write_all(bytes).await?;
-        file.sync_all().await
     }
-    .await;
-    if written.is_err() {
-        return DeliveryOutcome::NotSent("value_stage_write".into());
+    let path = path.to_owned();
+    let bytes = bytes.to_vec();
+    match tokio::task::spawn_blocking(move || {
+        write_replacing(&path, 0o600, |file| file.write_all(&bytes))
+    })
+    .await
+    {
+        Ok(Ok(())) => DeliveryOutcome::Delivered,
+        Ok(Err((ReplaceStep::Write, _))) => DeliveryOutcome::NotSent("value_stage_write".into()),
+        Ok(Err((ReplaceStep::Rename, _))) => DeliveryOutcome::NotSent("value_rename".into()),
+        Ok(Err((ReplaceStep::SyncDirectory, _))) | Err(_) => DeliveryOutcome::Unknown,
     }
-    if tokio::fs::rename(&staged, path).await.is_err() {
-        return DeliveryOutcome::NotSent("value_rename".into());
-    }
-    // The rename has published the value; only its durability is unconfirmed
-    // if the directory cannot be synced.
-    match async { tokio::fs::File::open(directory).await?.sync_all().await }.await {
-        Ok(()) => DeliveryOutcome::Delivered,
-        Err(_) => DeliveryOutcome::Unknown,
+}
+
+#[derive(Debug)]
+struct ValueConnector(DefaultConnector);
+
+impl Connector for ValueConnector {
+    type Out = Box<dyn Transport>;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails<'_>,
+        chained: Option<()>,
+    ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+        // These failures precede the HTTP request; later I/O failures remain uncertain.
+        self.0
+            .connect(details, chained)
+            .map_err(|error| match error {
+                ureq::Error::Io(_) | ureq::Error::Rustls(_) => ureq::Error::ConnectionFailed,
+                other => other,
+            })
     }
 }
 
 async fn http_value(url: &str, bytes: Vec<u8>, deadline: Duration) -> DeliveryOutcome {
-    let Ok(client) = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()
-    else {
-        return DeliveryOutcome::NotSent("value_http_client".into());
-    };
-    let response = tokio::time::timeout(
-        deadline,
-        client
-            .post(url)
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let config = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .proxy(None)
+            .http_status_as_error(false)
+            .timeout_global(Some(deadline))
+            .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ValueConnector(DefaultConnector::default()),
+            ureq::unversioned::resolver::DefaultResolver::default(),
+        );
+        match agent
+            .post(&url)
             .header("content-type", "application/json")
-            .body(bytes)
-            .send(),
-    )
-    .await;
-    match response {
-        // A value target acknowledges the POST through its status. Error text
-        // and URLs stay private, including configured query strings.
-        Ok(Ok(response)) if response.status().is_success() => DeliveryOutcome::Delivered,
-        Ok(Ok(_)) => DeliveryOutcome::NotSent("value_http_status".into()),
-        // Connection and TLS failures precede the request.
-        Ok(Err(error)) if error.is_connect() || error.is_builder() => {
-            DeliveryOutcome::NotSent("value_http_connect".into())
+            .send(&bytes[..])
+        {
+            Ok(response) if response.status().is_success() => DeliveryOutcome::Delivered,
+            Ok(_) => DeliveryOutcome::NotSent("value_http_status".into()),
+            Err(
+                ureq::Error::ConnectionFailed
+                | ureq::Error::HostNotFound
+                | ureq::Error::BadUri(_)
+                | ureq::Error::Tls(_),
+            ) => DeliveryOutcome::NotSent("value_http_connect".into()),
+            Err(_) => DeliveryOutcome::Unknown,
         }
-        Ok(Err(_)) | Err(_) => DeliveryOutcome::Unknown,
-    }
+    })
+    .await
+    .unwrap_or(DeliveryOutcome::Unknown)
 }
 
 #[cfg(test)]
