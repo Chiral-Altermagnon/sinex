@@ -256,7 +256,11 @@ fn payloads_without_metadata_and_removed_markers_keep_unknown_information() {
     assert_eq!(payload.front_matter, None);
     assert_eq!(payload.tags, None);
     assert_eq!(payload.key_kind(), sinex_model::KeyKind::Location);
-    assert_eq!(serde_json::to_value(payload).unwrap(), partial);
+    assert_eq!(
+        serde_json::to_value(payload).unwrap(),
+        serde_json::json!({"vault":"v","path":"a.md","native_vault_path_bytes":null,
+            "native_path_bytes":null,"text":"","size":0,"modified_at":null,"removed_at":null})
+    );
     let manifest = sinex_model::Manifest::from_json(serde_json::json!({"path":"/vault/v"}));
     let member = serde_json::from_value::<sinex_model::Member>(
         serde_json::json!({"path":"a.md","removed_at_ns":"1700000000000000000"}),
@@ -287,7 +291,8 @@ fn key(note: &NoteDocument) -> sinex_model::EquivalenceKey {
             NoteDocument::EVENT_TYPE,
             fields,
             &serde_json::to_value(note).unwrap(),
-        ),
+        )
+        .unwrap(),
         sinex_model::KeyKind::Location => panic!("this fixture has a known vault"),
     }
 }
@@ -303,6 +308,9 @@ fn a_renamed_note_keeps_one_identity() {
 #[devkit::test]
 fn a_note_without_an_id_is_its_path() {
     let first = note("text\n", "plain.md");
+    let payload = serde_json::to_value(&first).unwrap();
+    assert_eq!(payload.get("native_vault_path_bytes"), Some(&Value::Null));
+    assert_eq!(payload.get("native_path_bytes"), Some(&Value::Null));
     let renamed = note("text\n", "other.md");
     assert_ne!(key(&first), key(&renamed), "equal text never joins");
     let empty = note("---\nid: \"\"\n---\n", "e.md");
