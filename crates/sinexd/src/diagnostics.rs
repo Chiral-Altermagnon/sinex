@@ -8,6 +8,72 @@ use sinex_store::Verified;
 use sinex_store::diagnostics;
 use std::path::Path;
 
+/// Count retained located contents with no current recorded file available here.
+/// This checks paths, not the contents of external media; nothing is rehashed.
+fn missing_located_files(rows: Vec<diagnostics::LocatedFilePath>) -> Result<usize> {
+    use std::collections::BTreeMap;
+    let mut available = BTreeMap::new();
+    for row in rows {
+        let found = available.entry(row.content).or_insert(Ok(false));
+        if matches!(&*found, Ok(true)) {
+            continue;
+        }
+        let (Some(root), Some(path)) = (row.root, row.path) else {
+            continue;
+        };
+        let root = recorded_path(root, row.native_root)?;
+        let path = recorded_path(path, row.native_path)?;
+        if !root.is_absolute()
+            || path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid recorded file location",
+            )
+            .into());
+        }
+        match std::fs::metadata(root.join(path)) {
+            Ok(metadata) if metadata.is_file() => *found = Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            // One inaccessible copy cannot conceal another available copy.
+            Err(error) => *found = Err(error),
+        }
+    }
+    let mut missing = 0;
+    for found in available.into_values() {
+        if !found? {
+            missing += 1;
+        }
+    }
+    Ok(missing)
+}
+
+fn recorded_path(display: String, native: Option<String>) -> std::io::Result<std::path::PathBuf> {
+    use base64::Engine;
+    use std::os::unix::ffi::OsStringExt;
+    match native {
+        None => Ok(display.into()),
+        Some(encoded) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid recorded path encoding",
+                    )
+                })?;
+            Ok(std::ffi::OsString::from_vec(bytes).into())
+        }
+    }
+}
+
 fn utc_context() -> sinex_query::Context {
     sinex_query::Context::new(
         jiff::Timestamp::now(),
@@ -94,6 +160,22 @@ async fn doctor(database: &str, store: &Path) -> Value {
                             s.failures_24h
                         ),
                     );
+                    if s.schema_version.is_some() {
+                        let missing = diagnostics::located_file_paths(&mut conn)
+                            .await
+                            .map_err(Error::from)
+                            .and_then(missing_located_files);
+                        match missing {
+                            Ok(missing) => check(
+                                "located_files",
+                                true,
+                                format!(
+                                    "{missing} located files are in none of their recorded places on this machine; Sinex keeps their hashes and last locations"
+                                ),
+                            ),
+                            Err(error) => check("located_files", false, error.to_string()),
+                        }
+                    }
                     match sinex_store::query::source_rows(&mut conn, &utc_context()).await {
                         Ok(rows) => {
                             let stalled: Vec<_> = rows
@@ -194,3 +276,6 @@ pub(crate) async fn run(command: Command) -> Result<()> {
     crate::admin::emit(&format!("{value}\n"));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
