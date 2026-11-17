@@ -18,6 +18,7 @@ fn driver(root: PathBuf, part_bytes: usize) -> DirSnapshot {
         host: "h".into(),
         select: |p| p.ends_with(".md"),
         part_bytes,
+        locate: None,
         removed_at_source: false,
     }
 }
@@ -695,7 +696,8 @@ fn open_and_read_errors_belong_to_the_entry() {
             Path::new("missing"),
             &mut bundle,
             0,
-            0
+            0,
+            None,
         )
         .unwrap()
         .is_err()
@@ -707,7 +709,8 @@ fn open_and_read_errors_belong_to_the_entry() {
             Path::new("directory"),
             &mut bundle,
             dir.path().metadata().unwrap().len(),
-            tar::change_time(&dir.path().metadata().unwrap())
+            tar::change_time(&dir.path().metadata().unwrap()),
+            None,
         )
         .unwrap()
         .is_err()
