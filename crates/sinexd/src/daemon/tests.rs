@@ -333,7 +333,6 @@ async fn shutdown_fails_when_writer_backend_cleanup_fails(db: devkit::pg::TestDa
 
 #[devkit::test]
 async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::pg::TestDatabase) {
-    use futures::FutureExt;
     use sinex_store::NoDerivations;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let url = db.url(None);
@@ -366,7 +365,6 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
         .await
         .unwrap();
     let (handle, queues) = writer::channels();
-    let publication = handle.source_publication();
     let mut tasks = JoinSet::new();
     let database = url.clone();
     let store = blobs.clone();
@@ -443,30 +441,14 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
     let client = async_nats::connect(broker.url()).await.unwrap();
     let subjects = sinex_protocol::Subjects::sinex();
     let producer = broker.prefix().to_owned();
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
     let mut requests = client.subscribe(subjects.backup(&producer)).await.unwrap();
     // An ordered broker response proves the subscription is installed.
     async_nats::jetstream::new(client.clone())
         .query_account()
         .await
         .unwrap();
-    let responder = tokio::spawn({
-        let client = client.clone();
-        async move {
-            let request = requests.next().await.unwrap();
-            client
-                .publish(
-                    request.reply.unwrap(),
-                    serde_json::to_vec(&sinex_protocol::backup::Reply::Unavailable {
-                        reason: "synthetic producer unavailable".into(),
-                    })
-                    .unwrap()
-                    .into(),
-                )
-                .await
-                .unwrap();
-        }
-    });
+    let producer_client = client.clone();
     let reads = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -474,6 +456,7 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
         .unwrap();
     let (stop, stopped) = watch::channel(false);
     let api = Api {
+        backup_copy: Default::default(),
         backup_producers: Some((client, subjects, vec![producer])),
         source_config: Default::default(),
         read_failures: Default::default(),
@@ -492,6 +475,7 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
         library_roots: vec![],
         library_cache: root.path().join("library-cache"),
     };
+    let active_copy = api.backup_copy.clone();
     let socket = root.path().join("api.sock");
     let config = api::Config {
         socket: socket.clone(),
@@ -524,15 +508,16 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
     request.write_all(format!("GET /v1/backup/prepare?to={} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer operator\r\nConnection: close\r\n\r\n", output.display()).as_bytes()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            // This new reader can wait only once the backup's write guard is queued.
-            if publication.enter().now_or_never().is_none() {
+            // The admitted request owns the copy while its policy pause waits
+            // behind the source writer blocked above.
+            if active_copy.try_lock().is_err() {
                 break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("real admitted backup queued on source publication");
+    .expect("real admitted backup waiting for its policy pause");
     assert!(!root.path().join("backup/boundary.json").exists());
     drop(handle);
     stop.send_replace(true);
@@ -559,7 +544,14 @@ async fn shutdown_releases_source_and_backup_waiting_on_publication(db: devkit::
         .await
         .expect("owned HTTP request released")
         .unwrap();
-    responder.await.unwrap();
+    async_nats::jetstream::new(producer_client)
+        .query_account()
+        .await
+        .unwrap();
+    assert!(
+        requests.next().now_or_never().is_none(),
+        "cancellation before preparation must not pause a producer"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM public.backup_shutdown_probe")
             .fetch_one(&mut observer)
