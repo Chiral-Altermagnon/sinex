@@ -21,6 +21,7 @@ pub use replay::{
     LastStreamMessage, ReplayQuery, ReplayReply, SnapshotComplete, SnapshotCursor, SnapshotEvent,
     SnapshotNext, SnapshotReading, SnapshotReply, SnapshotStart,
 };
+pub mod rows;
 pub mod stage_report;
 
 pub use commands::{Access, Arg, ArgKind, COMMANDS, Command, command};

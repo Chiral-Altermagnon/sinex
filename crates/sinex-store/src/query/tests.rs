@@ -133,11 +133,11 @@ fn ctx() -> Context {
     Context::utc("2026-09-15T00:00:00Z".parse().unwrap())
 }
 
-async fn ask(conn: &mut PgConnection, text: &str) -> Answer {
+async fn ask(conn: &mut PgConnection, text: &str) -> QueryPage {
     ask_page(conn, text, Page::default()).await
 }
 
-async fn ask_page(conn: &mut PgConnection, text: &str, page: Page) -> Answer {
+async fn ask_page(conn: &mut PgConnection, text: &str, page: Page) -> QueryPage {
     let ctx = ctx();
     let result = if sinex_query::template::is_command(text) {
         let operation = sinex_query::template::parse(text, &ctx).unwrap();
@@ -148,7 +148,7 @@ async fn ask_page(conn: &mut PgConnection, text: &str, page: Page) -> Answer {
     result.unwrap_or_else(|e| panic!("{text}: {e}"))
 }
 
-fn column(a: &Answer, name: &str) -> Vec<serde_json::Value> {
+fn column(a: &QueryPage, name: &str) -> Vec<serde_json::Value> {
     a.rows.iter().map(|r| r[name].clone()).collect()
 }
 
@@ -1083,3 +1083,41 @@ async fn sql_hour_matches_the_daemon_zone_across_both_transitions(db: devkit::pg
 }
 
 mod source_states;
+
+#[devkit::test]
+async fn selected_event_identity_survives_a_renamed_projection(db: devkit::pg::TestDatabase) {
+    let mut conn = crate::AdmissionContext::connect(&db.url(None))
+        .await
+        .unwrap();
+    let ids = admit_commands(&mut conn, &[("echo projection", "/src/tide")]).await;
+    let expected: std::collections::BTreeSet<_> = ids
+        .into_iter()
+        .flat_map(|(fused, observed)| [fused, observed])
+        .collect();
+    let context = Context::utc("2026-09-15T00:00:00Z".parse().unwrap());
+    let selected = read_page(
+        &mut conn,
+        "events | fields text as id",
+        &context,
+        &Page::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.answer.columns, ["id"]);
+    assert_eq!(selected.event_ids.len(), selected.answer.rows.len());
+    assert_eq!(
+        selected
+            .event_ids
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert!(
+        selected
+            .answer
+            .rows
+            .iter()
+            .all(|row| !expected.iter().any(|id| row["id"] == id.to_string()))
+    );
+}

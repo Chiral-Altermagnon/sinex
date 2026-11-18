@@ -28,13 +28,14 @@ use compile::calendar::compile as compile_query;
 pub use compile::calendar::initialize as initialize_calendar;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use sinex_model::query_reply::{QueryPage, QueryPageInfo, ResolvedRead};
 use sinex_query::{AsOf, Context, Expr, FieldRef, Operand, Query, Source, Stage, Table, read_as};
 use sql::SqlFragment;
 use sqlx::{Connection, PgConnection};
 
 pub use cursor::context_for_page;
 pub use follow::{follow_position, follow_query};
-pub use walk::{resolve, show};
+pub use walk::{read_events, resolve, show};
 
 /// Which page of an answer to return.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -47,40 +48,6 @@ pub struct Page {
 }
 
 pub const DEFAULT_PAGE: u64 = 50;
-
-/// One page of an answer.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Answer {
-    pub table: String,
-    pub query: String,
-    pub read_as: String,
-    pub resolved: Resolved,
-    pub columns: Vec<String>,
-    pub rows: Vec<Json>,
-    /// Rows in the whole answer.
-    pub total: i64,
-    pub page: PageInfo,
-    /// What a recall found per source, and which sources had no data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recall: Option<Json>,
-}
-
-/// What the query used: `now`, the zone, the day start and the commit
-/// position it read at.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Resolved {
-    pub now: String,
-    pub zone: String,
-    pub day_start: String,
-    pub commit_seq: i64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PageInfo {
-    pub size: u64,
-    /// `None` on the last page.
-    pub cursor: Option<String>,
-}
 
 /// The newest commit position.
 pub async fn current_seq(conn: &mut PgConnection) -> Result<i64> {
@@ -214,10 +181,59 @@ pub async fn run(
     query: Option<&Query>,
     ctx: &Context,
     page: &Page,
-) -> Result<Answer> {
-    run_inner(conn, text, query, ctx, page, false, false, None)
+) -> Result<QueryPage> {
+    run_inner(conn, text, query, ctx, page, false, None, None)
         .await
         .map(|selected| selected.answer)
+}
+
+/// Read at an already accepted position without rewriting a query's text or
+/// adding a relation stage to provenance walks. Continuations keep that position.
+pub async fn read_at(
+    conn: &mut PgConnection,
+    text: &str,
+    ctx: &Context,
+    page: &Page,
+    position: i64,
+) -> Result<QueryPage> {
+    let operation = sinex_query::template::is_command(text)
+        .then(|| sinex_query::template::parse(text, ctx))
+        .transpose()?;
+    run_inner(
+        conn,
+        text,
+        None,
+        ctx,
+        page,
+        false,
+        Some(position),
+        operation.as_ref(),
+    )
+    .await
+    .map(|selected| selected.answer)
+}
+
+/// One display page with identities taken from the compiler's hidden columns,
+/// never from names a user can project or rename.
+pub struct QueryRead {
+    pub answer: QueryPage,
+    pub event_ids: Vec<Option<uuid::Uuid>>,
+}
+
+pub async fn read_page(
+    conn: &mut PgConnection,
+    text: &str,
+    ctx: &Context,
+    page: &Page,
+) -> Result<QueryRead> {
+    let operation = sinex_query::template::is_command(text)
+        .then(|| sinex_query::template::parse(text, ctx))
+        .transpose()?;
+    let selected = run_inner(conn, text, None, ctx, page, false, None, operation.as_ref()).await?;
+    Ok(QueryRead {
+        answer: selected.answer,
+        event_ids: selected.event_ids,
+    })
 }
 
 /// Execute a product operation with its already parsed shared relation body.
@@ -227,8 +243,8 @@ pub async fn run_operation(
     operation: &sinex_model::query_definition::Template,
     ctx: &Context,
     page: &Page,
-) -> Result<Answer> {
-    run_inner(conn, text, None, ctx, page, false, false, Some(operation))
+) -> Result<QueryPage> {
+    run_inner(conn, text, None, ctx, page, false, None, Some(operation))
         .await
         .map(|selected| selected.answer)
 }
@@ -241,16 +257,12 @@ async fn run_inner(
     ctx: &Context,
     page: &Page,
     capture_selection: bool,
-    in_snapshot: bool,
+    position: Option<i64>,
     operation: Option<&sinex_model::query_definition::Template>,
 ) -> Result<selected::SelectedPage> {
-    if !in_snapshot {
-        initialize_calendar(conn).await?;
-    }
+    initialize_calendar(conn).await?;
     let mut tx = conn.begin().await?;
-    if !in_snapshot {
-        read_one_snapshot(&mut tx).await?;
-    }
+    read_one_snapshot(&mut tx).await?;
     sqlx::query(&format!(
         "SET LOCAL TimeZone = '{}'",
         ctx.zone_name().replace('\'', "''")
@@ -380,8 +392,13 @@ async fn run_inner(
             }
             cursor.seq
         }
-        None => current,
+        None => position.unwrap_or(current),
     };
+    if position.is_some_and(|position| position != seq) {
+        return Err(Error::Invalid(
+            "read cursor belongs to another position".into(),
+        ));
+    }
     if page.cursor.is_none() {
         for stage in &query.stages {
             match stage {
@@ -390,6 +407,11 @@ async fn run_inner(
                 _ => {}
             }
         }
+    }
+    if position.is_some_and(|position| position != seq) {
+        return Err(Error::Invalid(
+            "query context differs from the accepted read position".into(),
+        ));
     }
     if seq < 0 || seq > current {
         return Err(Error::Invalid(
@@ -428,9 +450,9 @@ async fn run_inner(
     let mut captured = None;
     let mut selected_parents = Vec::new();
     let mut selected_class = sinex_model::Class::Open;
-    let mut answer = match &query.source {
+    let (mut answer, event_ids) = match &query.source {
         Source::Walk { walk, reference } => {
-            let rows = walk::walk(&mut tx, *walk, reference).await?;
+            let rows = walk::walk_at(&mut tx, *walk, reference, read.seq, current).await?;
             read.availability["graph"] =
                 serde_json::json!(cursor::digest(&serde_json::json!(rows))?);
             read.check_availability()?;
@@ -482,17 +504,32 @@ async fn run_inner(
                     vec!["numeric".into(), "timestamp with time zone".into()],
                 )
             });
-            Answer {
-                table,
-                query: text.into(),
-                read_as: reading,
-                resolved: read.resolved(),
-                columns,
-                total,
-                page: read.info(total, more, last)?,
-                rows: chosen,
-                recall: None,
-            }
+            let event_ids = chosen
+                .iter()
+                .map(|row| {
+                    row["id"]
+                        .as_str()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(|error| {
+                            Error::Invalid(format!("invalid selected event identity: {error}"))
+                        })
+                })
+                .collect::<Result<Vec<Option<uuid::Uuid>>>>()?;
+            (
+                QueryPage {
+                    table,
+                    query: text.into(),
+                    read_as: reading,
+                    resolved: read.resolved(),
+                    columns,
+                    total,
+                    page: read.info(total, more, last)?,
+                    rows: chosen,
+                    recall: None,
+                },
+                event_ids,
+            )
         }
         Source::Table { .. } => {
             read.check_availability()?;
@@ -560,6 +597,7 @@ async fn run_inner(
     tx.commit().await?;
     Ok(selected::SelectedPage {
         answer,
+        event_ids,
         selection: captured,
         parents: selected_parents,
         class: selected_class,
@@ -599,8 +637,8 @@ impl ReadPage {
         }
         Ok(())
     }
-    fn resolved(&self) -> Resolved {
-        Resolved {
+    fn resolved(&self) -> ResolvedRead {
+        ResolvedRead {
             now: self.ctx.now.to_string(),
             zone: self.ctx.zone_name(),
             day_start: self.ctx.day_start.to_string(),
@@ -612,7 +650,7 @@ impl ReadPage {
         total: i64,
         more: bool,
         last: Option<(query_language::cursor::OrderPosition, Vec<String>)>,
-    ) -> Result<PageInfo> {
+    ) -> Result<QueryPageInfo> {
         let cursor = if more {
             let (position, types) =
                 last.ok_or_else(|| Error::Invalid("query page did not advance".into()))?;
@@ -630,7 +668,7 @@ impl ReadPage {
         } else {
             None
         };
-        Ok(PageInfo {
+        Ok(QueryPageInfo {
             size: self.size,
             cursor,
         })
@@ -678,7 +716,7 @@ fn render_page(compiled: Compiled, read: &ReadPage) -> Result<Rendered> {
     let order = compiled.order_by();
     let total = read.prior.is_none().then(|| compiled.count.render());
     let mut rows = SqlFragment::text(format!(
-        "SELECT jsonb_build_object('row',({object}),'keys',jsonb_build_array({}),'types',q.\"_key_types\",'id',q.\"_row_identity\") FROM (",
+        "SELECT jsonb_build_object('row',({object}),'keys',jsonb_build_array({}),'types',q.\"_key_types\",'id',q.\"_row_identity\",'event_id',q.\"_event_id\") FROM (",
         values.join(", ")
     ));
     rows.append(compiled.answer).push(") q");
@@ -747,7 +785,7 @@ async fn page_of(
     query: &Query,
     read: &ReadPage,
     recall: Option<Json>,
-) -> Result<Answer> {
+) -> Result<(QueryPage, Vec<Option<uuid::Uuid>>)> {
     let (sql, values) = rendered.rows;
     let mut selected: Vec<Json> = sql::bind_scalar(sqlx::query_scalar(&sql), values)
         .fetch_all(&mut *tx)
@@ -794,20 +832,31 @@ async fn page_of(
         })
         .transpose()?;
     let page = read.info(total, more, last)?;
-    Ok(Answer {
-        table,
-        query: text.into(),
-        read_as: read_as(query, &read.ctx.zone),
-        resolved: read.resolved(),
-        columns: rendered.columns,
-        rows: selected
-            .into_iter()
-            .map(|mut row| row["row"].take())
-            .collect(),
-        total,
-        page,
-        recall,
-    })
+    let event_ids = selected
+        .iter()
+        .map(|row| {
+            serde_json::from_value(row["event_id"].clone()).map_err(|error| {
+                Error::Invalid(format!("invalid selected event identity: {error}"))
+            })
+        })
+        .collect::<Result<Vec<Option<uuid::Uuid>>>>()?;
+    Ok((
+        QueryPage {
+            table,
+            query: text.into(),
+            read_as: read_as(query, &read.ctx.zone),
+            resolved: read.resolved(),
+            columns: rendered.columns,
+            rows: selected
+                .into_iter()
+                .map(|mut row| row["row"].take())
+                .collect(),
+            total,
+            page,
+            recall,
+        },
+        event_ids,
+    ))
 }
 
 /// The commit position Sinex had reached at a time.
