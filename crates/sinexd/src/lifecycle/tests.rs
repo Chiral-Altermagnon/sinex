@@ -7,6 +7,7 @@ use sinex_model::{
     Batch, BatchKind, Class, Event, MaterialId, Origin, ReadingOrder, RecordLocation,
     RecordOutcome, RunId, Timestamp, event_types::CommandExecuted,
 };
+use sqlx::Connection;
 use std::sync::Arc;
 
 fn reading(key: u32, content: u32) -> Event {
@@ -59,6 +60,141 @@ async fn live(read: &mut PgConnection) -> i64 {
         .fetch_one(read)
         .await
         .unwrap()
+}
+
+#[devkit::test]
+async fn queued_lifecycle_retry_uses_committed_progress_and_completed_counts(
+    db: devkit::pg::TestDatabase,
+) {
+    let url = db.url(None);
+    let connection = PgConnection::connect(&url).await.unwrap();
+    let mut read = PgConnection::connect(&url).await.unwrap();
+    let (writer, queues) = channels();
+    let task = tokio::spawn(writer_run(
+        url,
+        claim(connection).await.unwrap(),
+        queues,
+        Arc::new(sinex_store::NoDerivations),
+        None,
+    ));
+    let mut readings: Vec<_> = (0..3).map(|key| (key, reading(key, key))).collect();
+    readings.sort_by_key(|(_, event)| event.id);
+    let conflict_key = readings.last().unwrap().0;
+    writer
+        .submit(
+            Priority::Live,
+            batch(readings.into_iter().map(|(_, event)| event).collect()),
+        )
+        .await
+        .unwrap();
+    let operation = lifecycle::begin(
+        &mut read,
+        Act::Archive,
+        "agent:fixture",
+        Scope::Source {
+            source: "ops".into(),
+            after: None,
+            before: None,
+        },
+    )
+    .await
+    .unwrap();
+    let first = writer
+        .lifecycle_step(&operation, lifecycle::Roots::Query(1))
+        .await
+        .unwrap();
+    let Step::Moved {
+        progress: first, ..
+    } = first.step
+    else {
+        panic!("first move refused")
+    };
+    assert_eq!(live(&mut read).await, 2);
+    let stale = writer
+        .lifecycle_step(
+            &operation,
+            lifecycle::Roots::Source {
+                operation: operation.id,
+                ids: vec![first.after.expect("first root committed")],
+                complete: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Step::Moved {
+        progress: unchanged,
+        counts,
+        ..
+    } = stale.step
+    else {
+        panic!("stale source prefix refused")
+    };
+    assert_eq!(unchanged, first);
+    assert_eq!(counts, Counts::default());
+    assert_eq!(live(&mut read).await, 2);
+    // The caller prepared this job before seeing the first job's commit.
+    let repeated = writer
+        .lifecycle_step(&operation, lifecycle::Roots::Query(1))
+        .await
+        .unwrap();
+    let Step::Moved {
+        progress: second, ..
+    } = repeated.step
+    else {
+        panic!("retry refused")
+    };
+    assert_eq!(second.batches, first.batches + 1);
+    assert_ne!(second.after, first.after);
+    assert_eq!(live(&mut read).await, 1);
+    let Answer::Done(done) = retry(&mut read, &writer, &operation).await.unwrap() else {
+        panic!("retry did not finish")
+    };
+    assert_eq!(done["cascade"]["archived"]["command.executed"], 3);
+    assert_eq!(live(&mut read).await, 0);
+    let repeated = writer
+        .lifecycle_step(&operation, lifecycle::Roots::Query(1))
+        .await
+        .unwrap();
+    assert!(matches!(repeated.step, Step::Moved { done: true, .. }));
+    let Answer::Done(again) = retry(&mut read, &writer, &operation).await.unwrap() else {
+        panic!("completed operation did not retain its result")
+    };
+    assert_eq!(again, done);
+    let restore = lifecycle::begin(
+        &mut read,
+        Act::Restore,
+        "agent:fixture",
+        Scope::Operation {
+            operation: operation.id,
+        },
+    )
+    .await
+    .unwrap();
+    let first = writer
+        .lifecycle_step(&restore, lifecycle::Roots::Query(1))
+        .await
+        .unwrap();
+    assert!(matches!(first.step, Step::Moved { done: false, .. }));
+    writer
+        .submit(Priority::Live, batch(vec![reading(conflict_key, 99)]))
+        .await
+        .unwrap();
+    // A restarted reader can still hold the zero from before that first batch.
+    let Answer::StoppedEarly(_, stopped) = drive(&writer, &restore, Progress::default(), None)
+        .await
+        .unwrap()
+    else {
+        panic!("a refusal after a committed batch must report the moved prefix")
+    };
+    assert_eq!(stopped["batches"], 1);
+    let Answer::StoppedEarly(_, recorded) = retry(&mut read, &writer, &restore).await.unwrap()
+    else {
+        panic!("the stopped prefix must remain available to retry")
+    };
+    assert_eq!(recorded["cascade"]["restored"]["command.executed"], 1);
+    assert_eq!(live(&mut read).await, 2);
+    drop(writer);
+    task.await.unwrap();
 }
 
 #[devkit::test]
@@ -207,7 +343,6 @@ async fn removed_source_archive_resumes_while_read_waits(db: devkit::pg::TestDat
     let first = writer
         .lifecycle_step(
             &op,
-            Progress::default(),
             lifecycle::Roots::Source {
                 operation: op.id,
                 ids: prefix,
@@ -295,7 +430,6 @@ async fn removed_source_archive_resumes_while_read_waits(db: devkit::pg::TestDat
     let part = writer
         .lifecycle_step(
             &op,
-            Progress::default(),
             lifecycle::Roots::Source {
                 operation: op.id,
                 ids: vec![new_id],

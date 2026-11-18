@@ -124,7 +124,6 @@ enum WriterJob {
     Replay(Box<ReplaySequence>, Reply<(Vec<Outcome>, Diff)>),
     Lifecycle {
         operation: Box<lifecycle::Operation>,
-        progress: Progress,
         roots: lifecycle::Roots,
         reply: Reply<LifecycleStep>,
     },
@@ -511,12 +510,10 @@ impl WriterHandle {
     pub(crate) async fn lifecycle_step(
         &self,
         operation: &lifecycle::Operation,
-        progress: Progress,
         roots: lifecycle::Roots,
     ) -> Result<LifecycleStep, WriteError> {
         self.ask(Priority::Derived, |reply| WriterJob::Lifecycle {
             operation: Box::new(operation.clone()),
-            progress,
             roots,
             reply,
         })
@@ -838,21 +835,12 @@ pub(crate) async fn run_notifying(
             }
             WriterJob::Lifecycle {
                 operation,
-                progress,
                 roots,
                 reply,
             } => {
                 answer!(
                     reply,
-                    lifecycle_step(
-                        &mut connection,
-                        &operation,
-                        progress,
-                        roots,
-                        keys.as_ref(),
-                        store
-                    )
-                    .await
+                    lifecycle_step(&mut connection, &operation, roots, keys.as_ref(), store).await
                 );
             }
             WriterJob::LifecycleEnd {
@@ -1533,13 +1521,59 @@ async fn stage_write(
 async fn lifecycle_step(
     connection: &mut AdmissionContext,
     operation: &lifecycle::Operation,
-    progress: Progress,
-    roots: lifecycle::Roots,
+    mut roots: lifecycle::Roots,
     keys: &dyn DirtyKeys,
     store: Option<&Blobs>,
 ) -> Result<LifecycleStep, WriteError> {
     let started = Instant::now();
     let mut tx = connection.begin().await?;
+    let mut progress = Progress::default();
+    // A cancelled caller can leave its already-queued batch to commit. The
+    // next attempt must observe that commit here, after reaching the writer.
+    if let Some((saved, done)) = lifecycle::saved_progress(tx.connection(), operation.id).await? {
+        progress = saved;
+        if done {
+            tx.rollback().await?;
+            return Ok(LifecycleStep {
+                step: Step::Moved {
+                    progress,
+                    counts: Default::default(),
+                    done: true,
+                    remove: Vec::new(),
+                },
+                held: started.elapsed(),
+            });
+        }
+    }
+    // Trim only a valid same-operation stream; malformed batches still reach
+    // the lifecycle's existing validation and refusal.
+    if let lifecycle::Roots::Source {
+        operation: source_operation,
+        ids,
+        complete,
+    } = &mut roots
+        && *source_operation == operation.id
+        && matches!(
+            operation.scope,
+            sinex_model::lifecycle::Scope::Source { .. }
+        )
+        && operation.act != sinex_model::lifecycle::Act::Undo
+        && ids.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        ids.retain(|id| progress.after.is_none_or(|after| *id > after));
+        if ids.is_empty() && !*complete {
+            tx.rollback().await?;
+            return Ok(LifecycleStep {
+                step: Step::Moved {
+                    progress,
+                    counts: Default::default(),
+                    done: false,
+                    remove: Vec::new(),
+                },
+                held: started.elapsed(),
+            });
+        }
+    }
     let since = sinex_store::query::current_seq(&mut tx).await?;
     let step = match lifecycle::step(&mut tx, operation, progress, roots, keys).await {
         Ok(step) => step,
@@ -1549,7 +1583,7 @@ async fn lifecycle_step(
         }
     };
     match &step {
-        Step::Refused(_) => tx.rollback().await?,
+        Step::Refused { .. } => tx.rollback().await?,
         Step::Moved { remove, .. } => {
             if let Err(error) = refresh_read_models(&mut tx, since).await {
                 tx.rollback().await?;

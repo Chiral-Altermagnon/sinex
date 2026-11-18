@@ -2,6 +2,22 @@
 use super::*;
 use sqlx::Connection;
 
+mod lifecycle;
+
+pub(super) fn lifecycle_request(selection: impl Into<String>, verb: &str) -> Value {
+    json!({
+        "operation":"rows", "request_id":sinex_model::OperationId::new(), "deadline":null,
+        "arguments":{"selection":selection.into(),"steps":[{"verb":verb,"all":true}]},
+    })
+}
+
+pub(super) fn lifecycle_receipt(answer: &Value) -> &Value {
+    assert_eq!(answer["outcome"], "ok", "{answer}");
+    let outcome = &answer["value"]["steps"][0]["outcome"];
+    assert_eq!(outcome["status"], "done", "{answer}");
+    &outcome["reply"]["reply"]
+}
+
 async fn status_call(w: &World, token: Option<&str>, arguments: Value) -> (StatusCode, Value) {
     let mut request = HttpRequest::post("/v1/status").header("content-type", "application/json");
     if let Some(token) = token {
@@ -349,13 +365,25 @@ async fn accepted_mutable_groups_keep_keys_when_values_change_and_new_groups_app
     );
     let (_, later)=rows_as(&w,OPERATOR,json!({"operation":"rows","request_id":"groups-later","arguments":{"selection":"events","steps":[{"verb":"save","name":"later"}]},"deadline":null})).await;
     assert_eq!(later["outcome"], "ok", "{later}");
-    let (_, archived)=call_unbounded(&w,Some(OPERATOR),json!({"method":"archive","target":original["value"]["steps"][0]["outcome"]["reply"]["reply"]["event"]})).await;
+    let (_, archived) = surface::rows_as(
+        &w,
+        OPERATOR,
+        surface::lifecycle_request(
+            original["value"]["steps"][0]["outcome"]["reply"]["reply"]["event"]
+                .as_str()
+                .unwrap(),
+            "archive",
+        ),
+    )
+    .await;
     assert_eq!(archived["outcome"], "ok", "{archived}");
     let (_, retry) = rows_as(&w, OPERATOR, request).await;
     assert_eq!(retry["outcome"], "ok", "{retry}");
+    // The archive line adds an accepted request to the existing request group;
+    // the new archive group is outside the original accepted group keys.
     assert_eq!(
         retry["value"]["population"]["rows"],
-        json!([{"id":"request","count":3}])
+        json!([{"id":"request","count":4}])
     );
     assert_eq!(retry["value"]["population"]["total"], 1);
     assert_eq!(retry["value"]["steps"][1], first["value"]["steps"][1]);
@@ -442,6 +470,24 @@ async fn request_intent_is_private_while_public_operation_scope_stays_readable(
         input.as_deref(),
         Some(question),
         "accepted intent is preserved privately"
+    );
+    let mut archive = lifecycle_request(question, "archive");
+    archive["request_id"] = json!("private-archive-question");
+    let (_, archived) = rows_as(&w, OPERATOR, archive).await;
+    assert_eq!(lifecycle_receipt(&archived)["scope"]["by"], "events");
+    let (_,listed) = rows_as(&w,READ,json!({
+        "operation":"rows","arguments":{"selection":"operations | fields id, scope"},"deadline":null,
+    })).await;
+    assert_eq!(listed["outcome"], "ok", "{listed}");
+    assert!(
+        !listed.to_string().contains("synthetic-guarded-question"),
+        "private lifecycle intent is not public scope: {listed}"
+    );
+    let input:Option<String>=sqlx::query_scalar("SELECT input->'arguments'->>'selection' FROM core.operation_requests WHERE request_id='private-archive-question'").fetch_one(&w.reads).await.unwrap();
+    assert_eq!(
+        input.as_deref(),
+        Some(question),
+        "lifecycle intent is preserved by its private request owner"
     );
 }
 
