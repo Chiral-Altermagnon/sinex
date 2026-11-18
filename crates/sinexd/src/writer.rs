@@ -1,4 +1,4 @@
-//! The writer task: the only database writer. It takes batches from three
+//! The event-admission writer. It takes batches from three
 //! channels in priority order, live before derived before bulk, so a stage
 //! never starves live capture, and runs admission for each batch in its own
 //! transaction.
@@ -42,6 +42,10 @@ pub(crate) enum WriteError {
     Unavailable(String),
     #[error("the writer has stopped")]
     Stopped,
+    #[error("{0}")]
+    Internal(String),
+    #[error("request identity was already used with different arguments")]
+    RequestConflict,
     /// The inputs this write was computed from changed before it committed;
     /// the caller computes it again from the committed state.
     #[error("{0}; evaluate again")]
@@ -63,6 +67,10 @@ impl From<WriteError> for command_surface::Failure {
             }
             WriteError::Stopped => {
                 Failure::new(FailureKind::NotRunning, message).with_code("writer_stopped")
+            }
+            WriteError::Internal(_) => Failure::new(FailureKind::Internal, message),
+            WriteError::RequestConflict => {
+                Failure::new(FailureKind::Conflict, message).with_code("request_conflict")
             }
             WriteError::Stale(_) => {
                 let mut failure = Failure::new(FailureKind::Conflict, message).with_code("stale");
@@ -91,6 +99,15 @@ type Reply<T> = oneshot::Sender<Result<T, WriteError>>;
 
 enum WriterJob {
     Admit(Batch, Reply<Outcome>),
+    BeginRequest {
+        caller: String,
+        id: String,
+        actor: String,
+        arguments: Value,
+        reply: Reply<sinex_store::requests::Accepted>,
+    },
+    Request(Batch, RequestStep, AdmissionCheck, Reply<RequestAdmission>),
+    FinishRequest(OperationId, bool, Reply<()>),
     Signals(
         Option<Batch>,
         Box<sinex_store::signals::Commit>,
@@ -160,6 +177,25 @@ enum Saved<'a> {
     Nothing,
     Stage(&'a StageCheckpoint),
     Curation,
+    Request(&'a RequestStep),
+}
+
+/// The committed answer is computed from admission's actual outcome.
+#[derive(Clone)]
+pub(crate) struct RequestStep {
+    pub operation: OperationId,
+    pub index: usize,
+    pub response: Arc<dyn Fn(&Outcome) -> Result<Value> + Send + Sync>,
+}
+
+pub(crate) struct RequestAdmission {
+    pub outcome: Outcome,
+    pub reply: Value,
+}
+
+struct Admission {
+    outcome: Outcome,
+    request_reply: Option<Value>,
 }
 
 /// What a stage operation writes besides its batches: its record in the
@@ -214,6 +250,11 @@ pub(crate) struct WriterHandle {
     derivations: Arc<tokio::sync::Mutex<()>>,
     signals: Arc<tokio::sync::Mutex<()>>,
     curation: Arc<tokio::sync::Mutex<()>>,
+    requests: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    >,
     live: mpsc::Sender<Job>,
     derived: mpsc::Sender<Job>,
     bulk: mpsc::Sender<Job>,
@@ -236,6 +277,69 @@ impl WriterHandle {
     /// requests from this daemon never plan against each other's snapshot.
     pub(crate) async fn lock_curation(&self) -> CurationTurn {
         CurationTurn(self.curation.clone().lock_owned().await)
+    }
+
+    /// Concurrent retries share preparation; the persisted receipt remains the
+    /// authority after a crash or daemon restart. Unrelated requests do not wait.
+    pub(crate) async fn lock_request(
+        &self,
+        caller: &str,
+        id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = format!("{}:{caller}{id}", caller.len());
+        let turn = {
+            let mut turns = self.requests.lock().await;
+            turns.retain(|_, turn| turn.strong_count() != 0);
+            if let Some(turn) = turns.get(&key).and_then(std::sync::Weak::upgrade) {
+                turn
+            } else {
+                let turn = Arc::new(tokio::sync::Mutex::new(()));
+                turns.insert(key, Arc::downgrade(&turn));
+                turn
+            }
+        };
+        turn.lock_owned().await
+    }
+
+    pub(crate) async fn begin_request(
+        &self,
+        caller: String,
+        id: String,
+        actor: String,
+        arguments: Value,
+    ) -> Result<sinex_store::requests::Accepted, WriteError> {
+        self.ask(Priority::Live, |reply| WriterJob::BeginRequest {
+            caller,
+            id,
+            actor,
+            arguments,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn finish_request(
+        &self,
+        operation: OperationId,
+        failed: bool,
+    ) -> Result<(), WriteError> {
+        self.ask(Priority::Live, |reply| {
+            WriterJob::FinishRequest(operation, failed, reply)
+        })
+        .await
+    }
+
+    pub(crate) async fn submit_request(
+        &self,
+        priority: Priority,
+        batch: Batch,
+        step: RequestStep,
+        check: AdmissionCheck,
+    ) -> Result<RequestAdmission, WriteError> {
+        self.ask(priority, |reply| {
+            WriterJob::Request(batch, step, check, reply)
+        })
+        .await
     }
 
     /// Shared by keyed computations in commands and the background runner.
@@ -446,11 +550,13 @@ impl WriterHandle {
         };
         let queued_at = std::time::Instant::now();
         let permit = channel.reserve().await.map_err(|_| WriteError::Stopped)?;
-        crate::request_deadline::admit().map_err(|_| WriteError::ReadDeadline)?;
-        permit.send(Job {
-            queued_at,
-            work: make(reply),
-        });
+        let work = make(reply);
+        if matches!(&work, WriterJob::BeginRequest { .. }) {
+            crate::request_deadline::check_read().map_err(|_| WriteError::ReadDeadline)?;
+        } else {
+            crate::request_deadline::admit().map_err(|_| WriteError::ReadDeadline)?;
+        }
+        permit.send(Job { queued_at, work });
         answer.await.map_err(|_| WriteError::Stopped)?
     }
 }
@@ -478,6 +584,7 @@ pub(crate) fn channels() -> (WriterHandle, Queues) {
             derivations: Arc::new(tokio::sync::Mutex::new(())),
             signals: Arc::new(tokio::sync::Mutex::new(())),
             curation: Arc::new(tokio::sync::Mutex::new(())),
+            requests: Default::default(),
             live,
             derived,
             bulk,
@@ -574,6 +681,63 @@ pub(crate) async fn run_notifying(
             }};
         }
         match job.work {
+            WriterJob::FinishRequest(operation, failed, reply) => {
+                let result: Result<_, WriteError> = async {
+                    let mut tx = connection.begin().await?;
+                    sinex_store::requests::finish(tx.connection(), operation, failed).await?;
+                    tx.commit().await?;
+                    Ok(())
+                }
+                .await;
+                answer!(reply, result);
+            }
+            WriterJob::BeginRequest {
+                caller,
+                id,
+                actor,
+                arguments,
+                reply,
+            } => {
+                let result: Result<_, WriteError> = async {
+                    let mut tx = connection.begin().await?;
+                    let accepted = sinex_store::requests::begin(
+                        tx.connection(),
+                        &sinex_store::requests::Request {
+                            caller: &caller,
+                            id: &id,
+                            actor: &actor,
+                            arguments: &arguments,
+                        },
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    Ok(accepted)
+                }
+                .await;
+                answer!(reply, result);
+            }
+            WriterJob::Request(batch, step, check, reply) => {
+                let result = admit_with_checkpoint(
+                    &mut connection,
+                    &batch,
+                    keys.as_ref(),
+                    store,
+                    &*check,
+                    false,
+                    Saved::Request(&step),
+                )
+                .await
+                .and_then(|admitted| {
+                    let reply = admitted.request_reply.ok_or_else(|| {
+                        WriteError::Internal("request admission omitted its reply".into())
+                    })?;
+                    Ok(RequestAdmission {
+                        outcome: admitted.outcome,
+                        reply,
+                    })
+                });
+                answer!(reply, result);
+            }
             WriterJob::Admit(batch, reply) => {
                 batch_answer!(
                     reply,
@@ -617,6 +781,7 @@ pub(crate) async fn run_notifying(
                         Saved::Curation
                     )
                     .await
+                    .map(|admitted| admitted.outcome)
                 );
             }
             WriterJob::Checked(batch, check, reply) => {
@@ -648,6 +813,7 @@ pub(crate) async fn run_notifying(
                         stage.as_ref().map_or(Saved::Nothing, Saved::Stage)
                     )
                     .await
+                    .map(|admitted| admitted.outcome)
                 );
             }
             WriterJob::Replay(mut sequence, reply) => {
@@ -840,6 +1006,7 @@ async fn admit_checked(
         Saved::Nothing,
     )
     .await
+    .map(|admitted| admitted.outcome)
 }
 
 async fn admit_with_checkpoint(
@@ -850,12 +1017,16 @@ async fn admit_with_checkpoint(
     check: &(dyn Fn() -> Result<()> + Send + Sync),
     record_refusals: bool,
     saved: Saved<'_>,
-) -> Result<Outcome, WriteError> {
+) -> Result<Admission, WriteError> {
     let stage = match saved {
         Saved::Stage(stage) => Some(stage),
-        Saved::Nothing | Saved::Curation => None,
+        Saved::Nothing | Saved::Curation | Saved::Request(_) => None,
     };
     let curation = matches!(saved, Saved::Curation);
+    let request = match saved {
+        Saved::Request(step) => Some(step),
+        _ => None,
+    };
     let unavailable = |e: &dyn std::fmt::Display| WriteError::Unavailable(e.to_string());
     let checks_started = std::time::Instant::now();
     check().map_err(|error| WriteError::Refused(error.to_string()))?;
@@ -877,6 +1048,18 @@ async fn admit_with_checkpoint(
     let begin_started = std::time::Instant::now();
     let mut tx = connection.begin().await?;
     let begin_time = begin_started.elapsed();
+    if let Some(step) = request
+        && let Some(recorded) =
+            sinex_store::requests::step(tx.connection(), step.operation, step.index).await?
+    {
+        let recorded: sinex_store::requests::CommittedStep = serde_json::from_value(recorded)
+            .map_err(|error| WriteError::Internal(format!("committed request outcome: {error}")))?;
+        tx.rollback().await?;
+        return Ok(Admission {
+            outcome: recorded.outcome(),
+            request_reply: Some(recorded.reply),
+        });
+    }
     let since = sinex_store::query::current_seq(&mut tx).await?;
     if curation {
         let records: Vec<sinex_model::event_types::library::Curation> = batch
@@ -908,12 +1091,33 @@ async fn admit_with_checkpoint(
                 tx.rollback().await?;
                 return Err(error);
             }
+            let request_reply = if let Some(step) = request {
+                let reply = (step.response)(&outcome)
+                    .map_err(|error| WriteError::Internal(error.to_string()))?;
+                sinex_store::runs::end(tx.connection(), batch.run).await?;
+                let recorded = sinex_store::requests::CommittedStep::new(reply.clone(), &outcome);
+                let recorded = serde_json::to_value(recorded)
+                    .map_err(|error| WriteError::Internal(error.to_string()))?;
+                sinex_store::requests::save_step(
+                    tx.connection(),
+                    step.operation,
+                    step.index,
+                    &recorded,
+                )
+                .await?;
+                Some(reply)
+            } else {
+                None
+            };
             let started = std::time::Instant::now();
             tx.commit().await?;
             outcome.timings.insert("commit", started.elapsed());
             outcome.timings.insert("checks", checks_time);
             outcome.timings.insert("begin", begin_time);
-            Ok(outcome)
+            Ok(Admission {
+                outcome,
+                request_reply,
+            })
         }
         Err(error) => {
             tx.rollback().await?;
@@ -931,7 +1135,10 @@ async fn admit_with_checkpoint(
                     save_stage(tx.connection(), &failed, stage, &outcome).await?;
                 }
                 tx.commit().await?;
-                return Ok(outcome);
+                return Ok(Admission {
+                    outcome,
+                    request_reply: None,
+                });
             }
             Err(error)
         }
@@ -1089,6 +1296,9 @@ impl From<sqlx::Error> for WriteError {
 
 impl From<sinex_store::Error> for WriteError {
     fn from(error: sinex_store::Error) -> Self {
+        if let sinex_store::Error::RequestConflict = error {
+            return WriteError::RequestConflict;
+        }
         if let sinex_store::Error::StaleCheckpoint = error {
             return WriteError::Stale("signal checkpoint changed");
         }

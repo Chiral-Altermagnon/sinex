@@ -9,6 +9,8 @@ mod cursor;
 mod fields;
 mod follow;
 mod products;
+mod question;
+pub use question::Question;
 mod recall;
 mod saved;
 mod selected;
@@ -182,7 +184,7 @@ pub async fn run(
     ctx: &Context,
     page: &Page,
 ) -> Result<QueryPage> {
-    run_inner(conn, text, query, ctx, page, false, None, None)
+    run_inner(conn, text, query, ctx, page, false, None, None, None)
         .await
         .map(|selected| selected.answer)
 }
@@ -208,6 +210,7 @@ pub async fn read_at(
         false,
         Some(position),
         operation.as_ref(),
+        None,
     )
     .await
     .map(|selected| selected.answer)
@@ -229,7 +232,18 @@ pub async fn read_page(
     let operation = sinex_query::template::is_command(text)
         .then(|| sinex_query::template::parse(text, ctx))
         .transpose()?;
-    let selected = run_inner(conn, text, None, ctx, page, false, None, operation.as_ref()).await?;
+    let selected = run_inner(
+        conn,
+        text,
+        None,
+        ctx,
+        page,
+        false,
+        None,
+        operation.as_ref(),
+        None,
+    )
+    .await?;
     Ok(QueryRead {
         answer: selected.answer,
         event_ids: selected.event_ids,
@@ -244,9 +258,19 @@ pub async fn run_operation(
     ctx: &Context,
     page: &Page,
 ) -> Result<QueryPage> {
-    run_inner(conn, text, None, ctx, page, false, None, Some(operation))
-        .await
-        .map(|selected| selected.answer)
+    run_inner(
+        conn,
+        text,
+        None,
+        ctx,
+        page,
+        false,
+        None,
+        Some(operation),
+        None,
+    )
+    .await
+    .map(|selected| selected.answer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -259,6 +283,7 @@ async fn run_inner(
     capture_selection: bool,
     position: Option<i64>,
     operation: Option<&sinex_model::query_definition::Template>,
+    population: Option<(sinex_model::OperationId, i64)>,
 ) -> Result<selected::SelectedPage> {
     initialize_calendar(conn).await?;
     let mut tx = conn.begin().await?;
@@ -312,11 +337,9 @@ async fn run_inner(
             }
             Some(declarations)
         }
-        // The question identity already used this transaction's current
-        // declarations. Only a supplied catalog or historical cursor needs
-        // another snapshot here.
-        None if current_catalog_loaded => None,
-        None => Some(sinex_schema::kinds::all(&mut tx).await?),
+        // A supplied context already owns its immutable declaration snapshot.
+        // A new context loaded this transaction's catalog above.
+        None => None,
     };
     if let Some(declarations) = declarations {
         ctx.catalog = Some(sinex_query::QueryCatalog::new(declarations.into_values()));
@@ -428,7 +451,13 @@ async fn run_inner(
             "provenance walks do not support query stages; use a separate event query".into(),
         ));
     }
-    let availability = availability(&mut tx, query).await?;
+    let mut availability = availability(&mut tx, query).await?;
+    if population.is_some() {
+        availability
+            .as_object_mut()
+            .expect("availability object")
+            .remove("metadata");
+    }
     let mut read = ReadPage {
         question,
         ctx,
@@ -438,6 +467,7 @@ async fn run_inner(
         seal,
         question_id,
         availability,
+        accepted_count: population.map(|(_, count)| count),
     };
     let table = match &query.source {
         Source::Table { alias: Some(a), .. } => a.name.to_string(),
@@ -533,10 +563,22 @@ async fn run_inner(
         }
         Source::Table { .. } => {
             read.check_availability()?;
-            let rendered = render_page(
-                compile_query(&mut tx, &read.ctx, read.seq, query).await?,
-                &read,
-            )?;
+            let compiled = if let Some((operation, _)) = population {
+                let mut subjects = query.clone();
+                subjects.filter = None;
+                subjects.stages.retain(|stage| {
+                    !matches!(
+                        stage,
+                        Stage::Where(_) | Stage::Limit(_) | Stage::GroupFirst { .. }
+                    )
+                });
+                compile_query(&mut tx, &read.ctx, read.seq, &subjects)
+                    .await?
+                    .accepted_population(operation)
+            } else {
+                compile_query(&mut tx, &read.ctx, read.seq, query).await?
+            };
+            let rendered = render_page(compiled, &read)?;
             page_of(&mut tx, rendered, table, text, query, &read, None).await?
         }
         Source::Recall { .. } | Source::RecallLast { .. } | Source::RecallMark { .. } => {
@@ -625,6 +667,7 @@ struct ReadPage {
     size: u64,
     prior: Option<cursor::Cursor>,
     availability: Json,
+    accepted_count: Option<i64>,
 }
 impl ReadPage {
     fn check_availability(&self) -> Result<()> {
@@ -791,19 +834,44 @@ async fn page_of(
         .fetch_all(&mut *tx)
         .await
         .map_err(expression_error)?;
+    if let Some(count) = read.accepted_count {
+        let mut ordinal = read
+            .prior
+            .as_ref()
+            .and_then(|cursor| cursor.after.values.first())
+            .and_then(Json::as_i64)
+            .unwrap_or(0);
+        for row in &selected {
+            ordinal += 1;
+            if row["keys"][0].as_i64() != Some(ordinal) {
+                return Err(Error::NotFound(
+                    "an accepted subject is no longer available".into(),
+                ));
+            }
+        }
+        if (selected.len() as u64) <= read.size && ordinal < count {
+            return Err(Error::NotFound(
+                "an accepted subject is no longer available".into(),
+            ));
+        }
+    }
     let more = selected.len() as u64 > read.size;
     if more {
         selected.pop();
     }
-    let total = match &read.prior {
-        Some(cursor) => cursor.total,
-        None if !more => selected.len() as i64,
-        None => {
-            let (sql, values) = rendered.total.expect("first page has a total query");
-            sql::bind_scalar(sqlx::query_scalar::<_, i64>(&sql), values)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(expression_error)?
+    let total = if let Some(count) = read.accepted_count {
+        count
+    } else {
+        match &read.prior {
+            Some(cursor) => cursor.total,
+            None if !more => selected.len() as i64,
+            None => {
+                let (sql, values) = rendered.total.expect("first page has a total query");
+                sql::bind_scalar(sqlx::query_scalar::<_, i64>(&sql), values)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(expression_error)?
+            }
         }
     };
     let last = selected
