@@ -55,17 +55,34 @@ async fn api_read_past_its_deadline_answers_timeout_and_cancels_the_query(
         "the timed-out backend released its read"
     );
     sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
-    let (_, reply) = call(&w,Some(READ),json!({"method":"sql","sql":"SELECT current_setting('statement_timeout') AS budget","deadline":null})).await;
-    assert_eq!(reply["result"]["rows"], json!([{"budget":"0"}]), "{reply}");
+    let (_, reply) = surface::request_as(
+        &w,
+        "/v1/sql",
+        READ,
+        sql_request(
+            "SELECT current_setting('statement_timeout') AS budget",
+            None,
+            None,
+            command_surface::Deadline::None,
+        ),
+    )
+    .await;
+    assert_eq!(reply["value"]["rows"], json!([{"budget":"0"}]), "{reply}");
 }
 
 #[devkit::test]
 async fn deadline_none_waits_and_does_not_inherit_an_earlier_budget(db: devkit::pg::TestDatabase) {
     let w = world(db).await;
-    let (_, first) = call(
+    let (_, first) = surface::request_as(
         &w,
-        Some(READ),
-        json!({"method":"sql","sql":"SELECT pg_backend_pid() AS pid","deadline":500}),
+        "/v1/sql",
+        READ,
+        sql_request(
+            "SELECT pg_backend_pid() AS pid",
+            None,
+            None,
+            command_surface::Deadline::Milliseconds(500),
+        ),
     )
     .await;
     assert_eq!(first["outcome"], "ok", "{first}");
@@ -219,10 +236,16 @@ async fn large_finite_budget_keeps_pool_reuse_and_does_not_become_a_postgres_cap
         PgPoolOptions::new().max_connections(1),
     )
     .await;
-    let (_, first) = call(
+    let (_, first) = surface::request_as(
         &w,
-        Some(READ),
-        json!({"method":"sql","sql":"SELECT pg_backend_pid() AS pid","deadline":2000}),
+        "/v1/sql",
+        READ,
+        sql_request(
+            "SELECT pg_backend_pid() AS pid",
+            None,
+            None,
+            command_surface::Deadline::Milliseconds(2000),
+        ),
     )
     .await;
     assert_eq!(first["outcome"], "ok", "{first}");
@@ -292,6 +315,45 @@ async fn disconnect_cancels_an_unbounded_read_backend(db: devkit::pg::TestDataba
 }
 
 #[devkit::test]
+async fn disconnect_cancels_a_typed_sql_reader(db: devkit::pg::TestDatabase) {
+    let w = world(db).await;
+    let mut lock = locked(&w, "ACCESS EXCLUSIVE").await;
+    assert_eq!(active_readers(&mut lock).await, 0);
+    let app = w.app.clone();
+    let read = tokio::spawn(async move {
+        app.oneshot(
+            HttpRequest::post("/v1/sql")
+                .header("authorization", format!("Bearer {READ}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    sql_request(
+                        "SELECT count(*) FROM core.visible_events",
+                        None,
+                        None,
+                        command_surface::Deadline::None,
+                    )
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    });
+    let limit = std::time::Instant::now() + Duration::from_secs(3);
+    wait_for_reader(&mut lock).await;
+    read.abort();
+    let _ = read.await;
+    while active_readers(&mut lock).await != 0 {
+        assert!(
+            std::time::Instant::now() < limit,
+            "disconnect left its typed SQL backend running"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
+}
+
+#[devkit::test]
 async fn a_first_sql_page_timeout_does_not_publish_an_unread_cursor(db: devkit::pg::TestDatabase) {
     use age::secrecy::ExposeSecret;
     let w = world(db).await;
@@ -314,13 +376,19 @@ async fn a_first_sql_page_timeout_does_not_publish_an_unread_cursor(db: devkit::
         .execute(&mut lock)
         .await
         .unwrap();
-    let (_, reply) = call(
+    let (_, reply) = surface::request_as(
         &w,
-        Some(OPERATOR),
-        json!({"method":"sql", "sql":statement, "page-size":1, "deadline":200}),
+        "/v1/sql",
+        OPERATOR,
+        sql_request(
+            &statement,
+            Some(1),
+            None,
+            command_surface::Deadline::Milliseconds(200),
+        ),
     )
     .await;
-    assert_eq!(reply["failure"]["kind"], "timeout", "{reply}");
+    assert_eq!(reply["error"]["kind"], "timeout", "{reply}");
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND application_name='sinex.api' AND state IN ('idle in transaction','idle in transaction (aborted)')")
         .fetch_one(&mut lock).await.unwrap();
     assert_eq!(held, 0, "a failed first page kept an unreachable cursor");

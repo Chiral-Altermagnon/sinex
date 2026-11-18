@@ -207,6 +207,7 @@ pub(crate) fn router(
         .route("/v1", post(call))
         .route("/v1/status", post(surface_call))
         .route("/v1/rows", post(surface_call))
+        .route("/v1/sql", post(surface_call))
         .route("/v1/commands", get(commands))
         .route("/v1/follow", get(follow))
         .route("/v1/backup/prepare", get(backup_prepare))
@@ -261,10 +262,12 @@ async fn surface_call(
         .body(body.to_vec())
         .expect("accepted URI");
     *request.headers_mut() = headers;
-    let response = state
-        .operations
-        .http_as(request, caller, command_surface::CancellationToken::new())
-        .await;
+    let response = crate::request_deadline::with_cleanup(state.operations.http_as(
+        request,
+        caller,
+        command_surface::CancellationToken::new(),
+    ))
+    .await;
     let (parts, body) = response.into_parts();
     Response::from_parts(parts, axum::body::Body::from(body))
 }
