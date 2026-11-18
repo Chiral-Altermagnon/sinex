@@ -193,6 +193,7 @@ impl ReadModel for SearchText {
         tx: &'a mut PgConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            sinex_store::read_models::set_search_memory_budget(tx).await?;
             sinex_store::read_models::apply_search_text(tx, events)
                 .await
                 .map_err(Error::from)
