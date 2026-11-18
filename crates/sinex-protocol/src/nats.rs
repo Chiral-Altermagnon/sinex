@@ -659,7 +659,7 @@ pub struct AckHint {
     pub frame_hash: String,
 }
 
-pub const PRODUCER_VERSION: u32 = 6;
+pub const PRODUCER_VERSION: u32 = 7;
 
 /// Checked before any material or events are sent. Event declarations can
 /// be registered here before checking the names the producer will emit.
@@ -920,9 +920,8 @@ pub enum ConfirmedConsumerReply {
         scope: String,
         reason: String,
     },
-    Refused {
-        reason: String,
-    },
+    /// The caller can distinguish loss of its read grant from an unavailable stream.
+    Refused(FetchRefusal),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
