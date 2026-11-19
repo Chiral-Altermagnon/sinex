@@ -25,6 +25,20 @@ fn path(p: &[&str]) -> Vec<String> {
     p.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// Read live payloads of one kind from the exact key of a derivation, in commit order.
+pub async fn live_derived(
+    conn: &mut PgConnection,
+    derivation: &str,
+    key: &Value,
+    event_type: &str,
+) -> Result<Vec<Value>> {
+    Ok(
+        sqlx::query_file_scalar!("src/payloads/live_derived.sql", derivation, key, event_type)
+            .fetch_all(&mut *conn)
+            .await?,
+    )
+}
+
 /// Live payloads of `event_type` whose text at `field` (a payload path) is
 /// one of `values`, in commit order.
 pub async fn live_where(

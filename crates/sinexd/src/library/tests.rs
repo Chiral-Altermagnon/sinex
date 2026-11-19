@@ -466,6 +466,26 @@ async fn the_library_end_to_end(db: devkit::pg::TestDatabase) {
     );
     let vb = w.ok(Request::LibraryItem { item: ib.clone() }).await;
     assert_eq!(vb["revision"], vb["content"]);
+    let current = w
+        .ok(Request::LibraryOpen {
+            item: ib.clone(),
+            rendition: None,
+        })
+        .await;
+    assert_eq!(current["revision"], vb["revision"]);
+    assert_eq!(current["content"], vb["content"]);
+    let missing = w
+        .run(Request::LibraryOpen {
+            item: "library:missing".into(),
+            rendition: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        missing
+            .to_string()
+            .contains("no library item library:missing")
+    );
     let old = vb["renditions"]
         .as_array()
         .unwrap()
@@ -761,6 +781,95 @@ async fn has_extent(conn: &mut PgConnection, content: &str) -> bool {
         .fetch_one(conn)
         .await
         .unwrap()
+}
+
+#[devkit::test]
+async fn library_open_keeps_privacy_transformed_items_addressable(db: devkit::pg::TestDatabase) {
+    use sinex_model::Class;
+    use sinex_model::event_types::library::{Item, item_id, item_key};
+    use sinex_store::privacy::{Action, MASK, NewRule, add_rule};
+
+    let mut w = world(db).await;
+    let id = |file| item_id(&item_key("h", w.root.to_str().unwrap(), file));
+    let masked = id("masked.txt");
+    let hashed = id("hashed.txt");
+    let untouched = id("plain.txt");
+    for (name, field, matcher, matcher_arg, action) in [
+        ("label", "/label", "all", None, Action::Mask),
+        (
+            "masked item",
+            "/item",
+            "pattern",
+            Some(format!("^{masked}$")),
+            Action::Mask,
+        ),
+        (
+            "hashed item",
+            "/item",
+            "pattern",
+            Some(format!("^{hashed}$")),
+            Action::Hash,
+        ),
+    ] {
+        add_rule(
+            &mut w.conn,
+            &NewRule {
+                name: name.into(),
+                source: Item::DERIVATION.into(),
+                event_type: Some("library.item".into()),
+                field: Some(field.into()),
+                matcher: matcher.into(),
+                matcher_arg,
+                class: Class::Open,
+                action,
+                author: "operator".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let files = ["plain.txt", "masked.txt", "hashed.txt"];
+    for file in files {
+        std::fs::write(w.root.join(file), file).unwrap();
+    }
+    w.ok(Request::LibraryAdd {
+        path: w.root.display().to_string(),
+        reference: None,
+    })
+    .await;
+
+    for file in files {
+        let path = w.root.join(file);
+        let item = w.item_at(&path).await;
+        match file {
+            "plain.txt" => assert_eq!(item, untouched),
+            "masked.txt" => assert_eq!(item, MASK),
+            "hashed.txt" => assert!(item.starts_with("hash:")),
+            _ => unreachable!(),
+        }
+        let reading = sinex_library::reads::item(&mut w.conn, &item)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reading.label.as_deref(), Some(MASK));
+        let opened = w
+            .ok(Request::LibraryOpen {
+                item,
+                rendition: None,
+            })
+            .await;
+        assert_eq!(opened["path"], path.to_str().unwrap());
+        assert_eq!(opened["verified_copy_on_disk"], true);
+    }
+    for original in [masked, hashed] {
+        assert!(
+            sinex_library::reads::item(&mut w.conn, &original)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    std::fs::remove_dir_all(w.root.parent().unwrap()).unwrap();
 }
 
 #[devkit::test]

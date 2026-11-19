@@ -367,6 +367,12 @@ async fn trace_and_show_read_selected_events_in_compressed_history(db: devkit::p
     insert(&mut conn, root).await;
     let child = derived(&[root_id], "selected child");
     let child_id = child.id;
+    let child_lookup = (
+        child.source.clone(),
+        child.event_type.clone(),
+        child.payload["record"].clone(),
+        child.payload.clone(),
+    );
     insert(&mut conn, child).await;
     let leaf = derived(&[child_id], "selected leaf");
     let leaf_id = leaf.id;
@@ -374,6 +380,20 @@ async fn trace_and_show_read_selected_events_in_compressed_history(db: devkit::p
     let unrelated_root = source(Class::Open);
     let unrelated_id = unrelated_root.id;
     insert(&mut conn, unrelated_root).await;
+    let (source, kind, key, payload) = &child_lookup;
+    sqlx::query("INSERT INTO derivation.outputs (derivation, key, event_id) VALUES ($1, $2, $3)")
+        .bind(source)
+        .bind(key)
+        .bind(child_id.0)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::payloads::live_derived(&mut conn, source, key, kind)
+            .await
+            .unwrap(),
+        [payload.clone()]
+    );
     let unrelated: Vec<_> = (0..8192)
         .map(|index| derived(&[unrelated_id], &format!("unrelated-{index}")))
         .collect();
@@ -386,6 +406,21 @@ async fn trace_and_show_read_selected_events_in_compressed_history(db: devkit::p
         8192
     );
     tx.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query(
+            "INSERT INTO derivation.outputs (derivation, key, event_id)
+             SELECT e.source, e.payload->'record', e.id FROM core.events e
+             WHERE e.source=$1 AND e.event_type=$2 AND e.id<>$3",
+        )
+        .bind(source)
+        .bind(kind)
+        .bind(child_id.0)
+        .execute(&mut *conn)
+        .await
+        .unwrap()
+        .rows_affected(),
+        8193
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM core.events")
             .fetch_one(&mut conn)
@@ -416,7 +451,7 @@ async fn trace_and_show_read_selected_events_in_compressed_history(db: devkit::p
             .await
             .unwrap();
     assert!(compressed > 0);
-    sqlx::raw_sql("ANALYZE core.events; ANALYZE raw.materials")
+    sqlx::raw_sql("ANALYZE core.events; ANALYZE raw.materials; ANALYZE derivation.outputs")
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -478,6 +513,48 @@ async fn trace_and_show_read_selected_events_in_compressed_history(db: devkit::p
     assert_eq!(material_scan["Index Name"], "materials_pkey");
     assert_eq!(material_scan["Actual Rows"].as_f64(), Some(1.0));
     assert_eq!(material_scan["Actual Loops"].as_f64(), Some(1.0));
+
+    // All 8,192 new readings share the selected source and kind. Their keys
+    // must not add payload work to one exact-key read in compressed history.
+    assert_eq!(
+        crate::payloads::live_derived(&mut conn, source, key, kind)
+            .await
+            .unwrap(),
+        [payload.clone()]
+    );
+    assert!(
+        crate::payloads::live_derived(&mut conn, source, &json!("absent"), kind)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let sql = include_str!("../../payloads/live_derived.sql");
+    let explain: Json =
+        sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF) {sql}"))
+            .bind(source)
+            .bind(key)
+            .bind(kind)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    let mut nodes = Vec::new();
+    collect_nodes(&explain[0]["Plan"], &mut nodes);
+    let lookup = nodes
+        .iter()
+        .find(|node| node["Index Name"] == "outputs_pkey")
+        .expect("the lookup uses the complete derivation key");
+    assert_eq!(lookup["Actual Rows"].as_f64(), Some(1.0));
+    assert_eq!(lookup["Actual Loops"].as_f64(), Some(1.0));
+    assert!(nodes.iter().any(|node| node["Node Type"] == "Limit"
+        && node["Actual Rows"].as_f64() == Some(1.0)
+        && node["Actual Loops"].as_f64() == Some(1.0)));
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["Index Name"] == "live_equivalence_event"
+                && node["Actual Rows"].as_f64() == Some(1.0)
+                && node["Actual Loops"].as_f64() == Some(1.0))
+    );
 }
 
 #[devkit::test]
