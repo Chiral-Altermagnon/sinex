@@ -122,11 +122,7 @@ impl Keyed for LibraryItems {
             Self::NAME,
             copies.iter().map(|(event, _)| *event),
         ));
-        Computed {
-            outputs,
-            waiting: false,
-            error: None,
-        }
+        Computed::from_outputs(outputs, false)
     }
 }
 
@@ -139,7 +135,7 @@ impl PerEvent for Hints {
     const VERSION: u32 = 1;
     const INPUTS: &'static [&'static str] = &["library.copy"];
     const OUTPUTS: &'static [&'static str] = &["library.filename_hints"];
-    fn derive(&self, input: Input<'_>, _: &Env) -> Result<Vec<Event>, String> {
+    fn derive(&self, input: Input<'_>, _: &Env) -> Result<Vec<Event>, crate::ComputationError> {
         let event = input.event;
         if event.record_state == RecordState::Removed {
             return Ok(vec![]);
@@ -183,7 +179,7 @@ impl PerEvent for Hints {
             &payload,
             Self::NAME,
             [event],
-        )])
+        )?])
     }
 }
 fn nonempty(s: &str) -> Option<String> {

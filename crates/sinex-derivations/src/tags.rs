@@ -220,7 +220,7 @@ impl AnyPerEvent for TagApplier {
         Reads::Nothing
     }
 
-    fn derive(&self, input: Input<'_>, _: &Env) -> Result<Vec<Event>, String> {
+    fn derive(&self, input: Input<'_>, _: &Env) -> Result<Vec<Event>, crate::ComputationError> {
         let event = input.event;
         let mut assignments: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for rule in self.rules.iter().filter(|rule| {
@@ -239,9 +239,9 @@ impl AnyPerEvent for TagApplier {
                 .or_default()
                 .push(serde_json::to_string(rule).expect("rules serialize"));
         }
-        Ok(assignments
+        assignments
             .into_iter()
-            .map(|(tag, rules)| {
+            .map(|(tag, rules)| -> Result<_, crate::ComputationError> {
                 let mut output = derived(
                     &TagApplied {
                         tag: tag.to_owned(),
@@ -257,11 +257,11 @@ impl AnyPerEvent for TagApplier {
                     },
                     Self::NAME,
                     [event],
-                );
+                )?;
                 output.ts_orig = event.ts_orig;
-                output
+                Ok(output)
             })
-            .collect())
+            .collect()
     }
 }
 

@@ -37,6 +37,8 @@ pub(crate) enum WriteError {
     ReadDeadline,
     #[error("admission refused the batch: {0}")]
     Refused(String),
+    #[error("admission refused the batch: database refused invalid data ({0})")]
+    InvalidData(String),
     #[error("storage refused admission: {0}")]
     StorageRefused(String),
     #[error("database unavailable: {0}")]
@@ -53,18 +55,35 @@ pub(crate) enum WriteError {
     Stale(&'static str),
 }
 
+impl WriteError {
+    /// The shared content-refusal reason. Transport callers record it without
+    /// ever copying PostgreSQL's payload-bearing detail into diagnostics.
+    pub(crate) fn content_refusal(&self) -> Option<String> {
+        match self {
+            Self::Refused(reason) => Some(reason.clone()),
+            Self::InvalidData(code) => Some(format!("database refused invalid data ({code})")),
+            _ => None,
+        }
+    }
+}
+
 impl From<WriteError> for command_surface::Failure {
     fn from(error: WriteError) -> Self {
         use command_surface::{Failure, FailureKind};
         let message = error.to_string();
         match error {
             WriteError::ReadDeadline => crate::request_deadline::timeout().into(),
-            WriteError::Refused(_) => Failure::new(FailureKind::BadValue, message),
+            WriteError::Refused(_) | WriteError::InvalidData(_) => {
+                Failure::new(FailureKind::BadValue, message)
+            }
             WriteError::StorageRefused(_) => {
                 Failure::new(FailureKind::Refused, message).with_code("storage_refused")
             }
             WriteError::Unavailable(_) => {
-                Failure::new(FailureKind::NotRunning, message).with_code("database_unavailable")
+                let mut failure = Failure::new(FailureKind::NotRunning, message)
+                    .with_code("database_unavailable");
+                failure.retryable = true;
+                failure
             }
             WriteError::Stopped => {
                 Failure::new(FailureKind::NotRunning, message).with_code("writer_stopped")
@@ -99,7 +118,7 @@ pub(crate) struct ReplaySequence {
 type Reply<T> = oneshot::Sender<Result<T, WriteError>>;
 
 enum WriterJob {
-    Admit(Batch, Reply<Outcome>),
+    Admit(Arc<Batch>, Reply<Outcome>),
     BeginRequest {
         caller: String,
         id: String,
@@ -405,8 +424,9 @@ impl WriterHandle {
     pub(crate) async fn submit(
         &self,
         priority: Priority,
-        batch: Batch,
+        batch: impl Into<Arc<Batch>>,
     ) -> Result<Outcome, WriteError> {
+        let batch = batch.into();
         self.ask(priority, |reply| WriterJob::Admit(batch, reply))
             .await
     }
@@ -944,7 +964,7 @@ async fn answer<R>(
 ) -> bool {
     if matches!(
         &result,
-        Err(WriteError::Refused(_) | WriteError::Unavailable(_))
+        Err(WriteError::Refused(_) | WriteError::InvalidData(_) | WriteError::Unavailable(_))
     ) && connection.ping().await.is_err()
         && let Ok(fresh) = PgConnection::connect(url).await
     {
@@ -1130,8 +1150,8 @@ async fn admit_with_checkpoint(
             let recordable = record_refusals && content_error(&error);
             let error = WriteError::from(error);
             if recordable
-                && let WriteError::Refused(reason) = &error
-                && let Some(failed) = refused_source(batch, reason)
+                && let Some(reason) = error.content_refusal()
+                && let Some(failed) = refused_source(batch, &reason)
             {
                 check().map_err(|error| WriteError::Refused(error.to_string()))?;
                 let mut tx = connection.begin().await?;
@@ -1341,9 +1361,18 @@ impl From<sinex_store::Error> for WriteError {
             _ => false,
         };
         if temporary {
-            WriteError::Unavailable(error.to_string())
+            match &error {
+                sinex_store::Error::Database(sqlx::Error::Database(database)) => {
+                    WriteError::Unavailable(format!(
+                        "database reported {}",
+                        database.code().as_deref().unwrap_or("unknown SQLSTATE")
+                    ))
+                }
+                _ => WriteError::Unavailable(error.to_string()),
+            }
         } else if let sinex_store::Error::Database(database) = &error {
             match database.as_database_error().and_then(|error| error.code()) {
+                Some(code) if code.starts_with("22") => WriteError::InvalidData(code.into_owned()),
                 Some(code) => {
                     WriteError::Refused(format!("database refused invalid data ({code})"))
                 }
