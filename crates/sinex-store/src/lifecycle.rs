@@ -39,8 +39,11 @@ use uuid::Uuid;
 
 mod bytes;
 mod materials;
+mod owned_blobs;
 mod select;
 pub use bytes::remove_unreferenced;
+pub(crate) use owned_blobs::respect_released_blobs;
+pub use owned_blobs::{OwnedBlobRelease, owned_blob_removed, release_owned_blob};
 
 /// An operation as the engine runs it.
 #[derive(Clone, Debug, Serialize, Deserialize)]

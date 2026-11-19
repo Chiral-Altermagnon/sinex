@@ -110,6 +110,16 @@ pub(crate) const OPERATION_ROWS: &str = "CREATE TABLE core.operation_rows (
   PRIMARY KEY (operation_id, ordinal)
 )";
 
+pub(crate) const OWNED_BLOB_RELEASES: &str = "CREATE TABLE raw.owned_blob_releases (
+  material_id uuid NOT NULL REFERENCES raw.materials(id),
+  record_offset bigint NOT NULL,
+  output_index bigint NOT NULL,
+  event_type text NOT NULL,
+  blob text NOT NULL REFERENCES core.blobs(hash),
+  operation_id uuid NOT NULL REFERENCES core.operations(id),
+  PRIMARY KEY (material_id, record_offset, output_index, event_type, blob)
+)";
+
 /// Live keys keep all digest bits and distinguish their prefixed string forms.
 const ENCODE_EQUIVALENCE_KEY: &str = r#"CREATE FUNCTION core.encode_equivalence_key(key text)
 RETURNS bytea LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
@@ -508,6 +518,7 @@ pub(crate) fn tables(c: &Checks) -> Vec<String> {
         operations(c),
         OPERATION_REQUESTS.into(),
         OPERATION_ROWS.into(),
+        OWNED_BLOB_RELEASES.into(),
         KIND_PREFIXES.into(),
         kind_declarations(),
         REPLAY_REFUSALS.into(),
