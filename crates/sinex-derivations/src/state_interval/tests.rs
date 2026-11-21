@@ -358,6 +358,14 @@ fn suspend_closes_open_focus_interval() {
     let interval = output.outputs[0].payload_as::<StateInterval>().unwrap();
     assert_eq!(interval.started_at, at(0));
     assert_eq!(interval.ended_at, Some(at(60)));
+    assert_eq!(
+        interval.ended_at_evidence,
+        Some(IntervalTimeEvidence {
+            parent: suspend.id,
+            boundary: IntervalTimeBoundary::Transition,
+            quality: suspend.ts_orig.quality,
+        })
+    );
     assert_eq!(interval.end_event_type.as_deref(), Some("sleep.started"));
     assert_eq!(
         output.outputs[0].origin,
@@ -385,6 +393,7 @@ fn open_afk_span_clamped_at_creation() {
     let interval = output.outputs[0].payload_as::<StateInterval>().unwrap();
     assert_eq!(interval.started_at, at(0));
     assert_eq!(interval.ended_at, Some(at(60)));
+    assert_eq!(interval.ended_at_evidence, None);
     let later = Env {
         now: at(180),
         ..env.clone()
@@ -404,6 +413,18 @@ fn open_afk_span_clamped_at_creation() {
     };
     let completed = StateIntervals.compute(&key("desktop.activitywatch.afk"), &inputs, &finished);
     assert!(!completed.waiting);
+    assert_eq!(
+        completed.outputs[0]
+            .payload_as::<StateInterval>()
+            .unwrap()
+            .ended_at_evidence,
+        Some(IntervalTimeEvidence {
+            parent: inputs[0].id,
+            boundary: IntervalTimeBoundary::ObservedEnd,
+            quality: inputs[0].ts_orig.quality
+        })
+    );
+
     assert_eq!(
         completed.outputs[0]
             .payload_as::<StateInterval>()
