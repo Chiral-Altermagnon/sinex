@@ -3,6 +3,7 @@ use serde_json::json;
 use sqlx::Executor;
 
 pub(super) async fn before_status_readings(conn: &mut PgConnection) {
+    super::search_text::search_before_pieces(conn).await;
     conn.execute(include_str!("before_status_readings.sql"))
         .await
         .unwrap();
@@ -22,7 +23,7 @@ async fn status_upgrade_projects_compressed_coverage_and_counts_only_live_fusion
         .unwrap();
     // The template records only its fresh version.
     sqlx::query("INSERT INTO sinex_schema.applied (version) VALUES ($1)")
-        .bind(VERSION - 1)
+        .bind(53)
         .execute(&mut conn)
         .await
         .unwrap();
@@ -60,7 +61,7 @@ async fn status_upgrade_projects_compressed_coverage_and_counts_only_live_fusion
     assert_eq!(
         apply(&mut conn).await.unwrap(),
         Applied::Upgraded {
-            from: VERSION - 1,
+            from: 53,
             to: VERSION
         }
     );

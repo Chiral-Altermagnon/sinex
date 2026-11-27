@@ -67,9 +67,19 @@ pub(crate) async fn run(
         commits.borrow_and_update();
         let from = positions.iter().copied().min().unwrap_or(0);
         let read_started = std::time::Instant::now();
-        let page =
-            commit_log::after_in_one_snapshot(&mut conn, from, PAGE, sinex_store::PAGE_BYTES)
-                .await?;
+        let page = commit_log::after_in_one_snapshot(
+            &mut conn,
+            from,
+            PAGE,
+            sinex_store::PAGE_BYTES,
+            |seq, kind| {
+                consumers
+                    .iter()
+                    .zip(&positions)
+                    .any(|(consumer, position)| seq > *position && consumer.wants(kind))
+            },
+        )
+        .await?;
         let Some(up_to) = page.up_to else {
             tokio::select! {
                 _ = commits.changed() => {}
@@ -174,8 +184,7 @@ pub(crate) fn read_models() -> Vec<Box<dyn ReadModel>> {
     vec![Box::new(SearchText), Box::new(EmbeddingVectors)]
 }
 
-/// The full-text read model `core.search_text`: every event's payload text,
-/// normalized, for the query language's words.
+/// The text index of events whose kind is searchable.
 struct SearchText;
 
 impl ReadModel for SearchText {
@@ -183,8 +192,8 @@ impl ReadModel for SearchText {
         sinex_store::read_models::SEARCH_TEXT
     }
 
-    fn wants(&self, _event_type: &str) -> bool {
-        true
+    fn wants(&self, event_type: &str) -> bool {
+        sinex_model::event_types::find(event_type).is_none_or(|kind| kind.search_fields.is_some())
     }
 
     fn apply<'a>(
